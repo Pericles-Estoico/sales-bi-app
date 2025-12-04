@@ -1,179 +1,126 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
-import plotly.express as px
-from modules.bcg_analysis import BCGAnalysis
-from modules.pareto_analysis import ParetoAnalysis
-from modules.stock_projection import StockProjection
-from utils.data_processor import DataProcessor
-from modules.google_sheets_integration import GoogleSheetsIntegration
+from datetime import datetime
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import json
 
-# ---------------------------------------------------------
-# CONFIGURAÇÃO DA PÁGINA
-# ---------------------------------------------------------
-st.set_page_config(
-    page_title="Sales BI Analytics",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+st.set_page_config(page_title="Sales BI Analytics", page_icon="📊", layout="wide")
 
-# ---------------------------------------------------------
-# CSS
-# ---------------------------------------------------------
-st.markdown(
-    """
-<style>
-    .main {padding: 0rem 1rem;}
-    .stMetric {
-        background-color: #f0f2f6;
-        padding: 15px;
-        border-radius: 10px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
-</style>
-""",
-    unsafe_allow_html=True,
-)
+st.title("📊 Sales BI Analytics")
+st.subheader("Business Intelligence Executivo com Insights Acionáveis")
 
-# ---------------------------------------------------------
-# SESSION STATE
-# ---------------------------------------------------------
-if "historical_data" not in st.session_state:
-    st.session_state.historical_data = pd.DataFrame()
-if "channel_data" not in st.session_state:
-    st.session_state.channel_data = {}
-
-# ---------------------------------------------------------
-# DEFINIÇÃO DE CANAIS
-# ---------------------------------------------------------
+# Canais
 CHANNELS = {
-    "geral": {"name": "Vendas Gerais", "color": "#1f77b4", "icon": "📊"},
-    "mercado_livre": {"name": "Mercado Livre", "color": "#FFE600", "icon": "🛒"},
-    "shopee_matriz": {"name": "Shopee Matriz", "color": "#EE4D2D", "icon": "🛍️"},
-    "shopee_150": {"name": "Shopee 1:50", "color": "#FF6B35", "icon": "🏪"},
-    "shein": {"name": "Shein", "color": "#000000", "icon": "👗"},
+    'geral': '📊 Vendas Gerais',
+    'mercado_livre': '🛒 Mercado Livre',
+    'shopee_matriz': '🛍️ Shopee Matriz',
+    'shopee_150': '🏪 Shopee 1:50',
+    'shein': '👗 Shein'
 }
 
-# ---------------------------------------------------------
-# FUNÇÃO AUXILIAR: ENVIAR PARA GOOGLE SHEETS
-# ---------------------------------------------------------
-def enviar_para_google_sheets(daily_data: pd.DataFrame, canal_nome: str):
-    sheets = GoogleSheetsIntegration()
-    if not sheets.is_connected():
-        st.error(f"❌ Erro de conexão: {sheets.get_error()}")
-        st.info("💡 Verifique o arquivo .streamlit/secrets.toml no Streamlit Cloud.")
-        return
-
-    success, message = sheets.upload_daily_data(daily_data, canal_nome)
-    if success:
-        st.success(message)
-        st.info(f"🔗 [Abrir Planilha]({sheets.get_spreadsheet_url()})")
-    else:
-        st.error(message)
-
-
-# ---------------------------------------------------------
-# SIDEBAR
-# ---------------------------------------------------------
+# Sidebar
 with st.sidebar:
-    st.title("📊 Sales BI Analytics")
-    st.markdown("---")
+    st.header("Upload de Vendas")
+    canal = st.selectbox("Selecione o Canal", list(CHANNELS.keys()), format_func=lambda x: CHANNELS[x])
+    uploaded_file = st.file_uploader("Planilha Excel", type=['xlsx', 'xls'])
+    
+    if uploaded_file and st.button("🔄 Processar"):
+        df = pd.read_excel(uploaded_file)
+        df['Canal'] = CHANNELS[canal]
+        st.session_state['data'] = df
+        st.success(f"✅ {len(df)} registros carregados!")
 
-    st.subheader("📁 Upload de Vendas")
+# Main
+if 'data' in st.session_state and not st.session_state['data'].empty:
+    df = st.session_state['data']
+    
+    # Métricas
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total Vendas", f"R$ {df['Total'].sum():,.2f}")
+    col2.metric("Produtos", len(df))
+    col3.metric("Unidades", int(df['Quantidade'].sum()))
+    col4.metric("Ticket Médio", f"R$ {df['Total'].sum() / df['Quantidade'].sum():,.2f}")
+    
+    # Análise BCG
+    st.header("📈 Matriz BCG")
+    total_geral = df['Total'].sum()
+    produtos = df.groupby('Produto').agg({'Quantidade': 'sum', 'Total': 'sum'}).reset_index()
+    produtos['Participacao'] = (produtos['Total'] / total_geral) * 100
+    produtos['Crescimento'] = produtos['Quantidade'].apply(lambda x: 15 if x > 5 else 5 if x > 3 else -5)
+    
+    def classificar_bcg(row):
+        if row['Crescimento'] > 10 and row['Participacao'] > 5:
+            return 'Estrela'
+        elif row['Crescimento'] < 10 and row['Participacao'] > 5:
+            return 'Vaca Leiteira'
+        elif row['Crescimento'] > 10 and row['Participacao'] <= 5:
+            return 'Interrogação'
+        else:
+            return 'Abacaxi'
+    
+    produtos['Categoria'] = produtos.apply(classificar_bcg, axis=1)
+    
+    col1, col2, col3, col4 = st.columns(4)
+    for col, cat, emoji in zip([col1, col2, col3, col4], 
+                                ['Estrela', 'Vaca Leiteira', 'Interrogação', 'Abacaxi'],
+                                ['⭐', '🐄', '❓', '🍍']):
+        with col:
+            prods = produtos[produtos['Categoria'] == cat]
+            st.subheader(f"{emoji} {cat}")
+            st.metric("Produtos", len(prods))
+            st.dataframe(prods[['Produto', 'Quantidade']].head(5), hide_index=True)
+    
+    # Pareto
+    st.header("🎯 Análise Pareto 80/20")
+    produtos_sorted = produtos.sort_values('Total', ascending=False)
+    produtos_sorted['Acumulado'] = produtos_sorted['Total'].cumsum() / produtos_sorted['Total'].sum()
+    pareto_80 = produtos_sorted[produtos_sorted['Acumulado'] <= 0.8]
+    
+    st.info(f"💡 **Insight**: {len(pareto_80)} produtos ({len(pareto_80)/len(produtos)*100:.0f}%) geram 80% das vendas")
+    st.dataframe(pareto_80[['Produto', 'Quantidade', 'Total']], hide_index=True)
+    
+    # Google Sheets
+    st.header("📤 Exportar para Google Sheets")
+    if st.button("Enviar para Google Sheets"):
+        try:
+            # Configurar credenciais
+            scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+            creds_dict = json.loads(st.secrets["GOOGLE_SHEETS_CREDENTIALS"])
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+            client = gspread.authorize(creds)
+            
+            # Abrir planilha
+            sheet = client.open_by_url(st.secrets["GOOGLE_SHEETS_URL"]).sheet1
+            
+            # Limpar e adicionar dados
+            sheet.clear()
+            sheet.append_row(['Data', 'Produto', 'Quantidade', 'Preço Unitário', 'Total', 'Canal', 'Categoria BCG'])
+            
+            for _, row in df.iterrows():
+                cat_bcg = produtos[produtos['Produto'] == row['Produto']]['Categoria'].values[0]
+                sheet.append_row([
+                    str(row.get('Data', '')),
+                    row['Produto'],
+                    int(row['Quantidade']),
+                    float(row['Preço Unitário']),
+                    float(row['Total']),
+                    row['Canal'],
+                    cat_bcg
+                ])
+            
+            st.success("✅ Dados enviados com sucesso!")
+            st.info(f"🔗 [Abrir Planilha]({st.secrets['GOOGLE_SHEETS_URL']})")
+        except Exception as e:
+            st.error(f"❌ Erro: {str(e)}")
+            st.info("💡 Configure GOOGLE_SHEETS_CREDENTIALS e GOOGLE_SHEETS_URL nos Secrets")
 
-    upload_type = st.radio(
-        "Tipo de Upload",
-        ["📊 Vendas Gerais", "🏪 Por Canal de Venda"],
-        help="Escolha entre upload geral ou por canal específico",
-    )
-
-    # ------------------ UPLOAD GERAL ---------------------
-    if upload_type == "📊 Vendas Gerais":
-        st.markdown("### Upload Geral")
-        uploaded_file = st.file_uploader(
-            "Planilha de vendas diárias",
-            type=["xlsx", "xls", "csv"],
-            key="upload_geral",
-            help="Upload da planilha consolidada de vendas",
-        )
-
-        if uploaded_file and st.button(
-            "🔄 Processar Vendas Gerais", use_container_width=True
-        ):
-            with st.spinner("Processando..."):
-                processor = DataProcessor()
-                daily_data = processor.load_data(uploaded_file)
-                daily_data["Canal"] = "Geral"
-                daily_data["Data_Upload"] = datetime.now()
-
-                if st.session_state.historical_data.empty:
-                    st.session_state.historical_data = daily_data
-                else:
-                    st.session_state.historical_data = pd.concat(
-                        [st.session_state.historical_data, daily_data],
-                        ignore_index=True,
-                    )
-
-                st.success(f"✅ {len(daily_data)} registros processados!")
-                st.balloons()
-
-            if st.button(
-                "📤 Enviar para Google Sheets",
-                key="send_geral",
-                use_container_width=True,
-            ):
-                enviar_para_google_sheets(daily_data, "Geral")
-
-    # ------------------ UPLOAD POR CANAL -----------------
-    else:
-        st.markdown("### Upload por Canal")
-
-        selected_channel = st.selectbox(
-            "Selecione o Canal",
-            options=list(CHANNELS.keys()),
-            format_func=lambda x: f"{CHANNELS[x]['icon']} {CHANNELS[x]['name']}",
-        )
-
-        st.markdown(
-            f"""
-        <div style="background: {CHANNELS[selected_channel]['color']};
-                    padding: 10px; border-radius: 5px; color: white; text-align: center;">
-            <strong>{CHANNELS[selected_channel]['icon']} {CHANNELS[selected_channel]['name']}</strong>
-        </div>
-        """,
-            unsafe_allow_html=True,
-        )
-
-        uploaded_file = st.file_uploader(
-            f"Planilha {CHANNELS[selected_channel]['name']}",
-            type=["xlsx", "xls", "csv"],
-            key=f"upload_{selected_channel}",
-            help=f"Upload de vendas do canal {CHANNELS[selected_channel]['name']}",
-        )
-
-        if uploaded_file and st.button(
-            f"🔄 Processar {CHANNELS[selected_channel]['name']}",
-            use_container_width=True,
-        ):
-            with st.spinner("Processando..."):
-                processor = DataProcessor()
-                daily_data = processor.load_data(uploaded_file)
-                daily_data["Canal"] = CHANNELS[selected_channel]["name"]
-                daily_data["Canal_ID"] = selected_channel
-                daily_data["Data_Upload"] = datetime.now()
-
-                # salva por canal
-                if selected_channel not in st.session_state.channel_data:
-                    st.session_state.channel_data[selected_channel] = daily_data
-                else:
-                    st.session_state.channel_data[selected_channel] = pd.concat(
-                        [st.session_state.channel_data[selected_channel], daily_data],
-                        ignore_index=True,
-                    )
-
-                # histórico geral
-                if st.session_state.historical_data.empty:
-                    st.session_state.historical_data = daily_data
-                else:
-                    st.session_state.historical_data = pd.concat(
+else:
+    st.info("👈 Faça upload de uma planilha na barra lateral para começar")
+    st.markdown("""
+    ### O que você terá acesso:
+    - 📈 **Matriz BCG**: Classificação automática de produtos
+    - 🎯 **Análise Pareto**: Identifica produtos-chave
+    - 💡 **Insights Automáticos**: Recomendações acionáveis
+    - 📤 **Google Sheets**: Exportação automática
+    """)
