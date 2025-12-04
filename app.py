@@ -333,35 +333,6 @@ else:
         st.metric("Total Período", f"{total_vendas:,.0f}")
     
     # Performance por canal
-    if 'Canal' in df_filtered.columns and df_filtered['Canal'].nunique() > 1:
-        st.markdown("---")
-        st.subheader("🏪 Performance por Canal")
-        
-        col1, col2 = st.columns([2, 1])
-        
-        with col1:
-            # Gráfico de vendas por canal
-            df_canal = df_filtered.groupby('Canal')['Quantidade'].sum().reset_index()
-            df_canal = df_canal.sort_values('Quantidade', ascending=False)
-            
-            fig = px.bar(
-                df_canal,
-                x='Canal',
-                y='Quantidade',
-                title='Vendas por Canal',
-                color='Quantidade',
-                color_continuous_scale='Blues'
-            )
-            fig.update_layout(showlegend=False, height=350)
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            st.markdown("### 📊 Ranking de Canais")
-            for idx, row in df_canal.iterrows():
-                pct = row['Quantidade'] / df_canal['Quantidade'].sum() * 100
-                st.metric(
-                    row['Canal'],
-                    f"{row['Quantidade']:,.0f}",
                     f"{pct:.1f}%"
                 )
     
@@ -469,4 +440,3 @@ else:
             
             st.dataframe(df_comp, use_container_width=True)
         else:
-            st.info("📊 Carregue dados de múltiplos canais para análise comparativa")
