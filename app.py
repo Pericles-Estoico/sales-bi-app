@@ -7,6 +7,7 @@ from modules.bcg_analysis import BCGAnalysis
 from modules.pareto_analysis import ParetoAnalysis
 from modules.stock_projection import StockProjection
 from utils.data_processor import DataProcessor
+from modules.google_sheets_integration import GoogleSheetsIntegration
 import os
 import json
 
@@ -108,6 +109,21 @@ with st.sidebar:
                     
                     st.success(f"✅ {len(daily_data)} registros processados!")
                     st.balloons()
+                    
+                    # Botão para enviar ao Google Sheets
+                    if st.button("📤 Enviar para Google Sheets", key="send_geral", use_container_width=True):
+                        with st.spinner("Enviando para Google Sheets..."):
+                            sheets = GoogleSheetsIntegration()
+                            if sheets.is_connected():
+                                success, message = sheets.upload_daily_data(daily_data, "Geral")
+                                if success:
+                                    st.success(message)
+                                    st.info(f"🔗 [Abrir Planilha]({sheets.get_spreadsheet_url()})")
+                                else:
+                                    st.error(message)
+                            else:
+                                st.error(f"❌ Erro de conexão: {sheets.get_error()}")
+                                st.info("💡 Verifique as configurações de Secrets no Streamlit Cloud")
     
     else:
         st.markdown("### Upload por Canal")
@@ -161,6 +177,21 @@ with st.sidebar:
                     
                     st.success(f"✅ {len(daily_data)} registros de {CHANNELS[selected_channel]['name']} processados!")
                     st.balloons()
+                    
+                    # Botão para enviar ao Google Sheets
+                    if st.button("📤 Enviar para Google Sheets", key=f"send_{selected_channel}", use_container_width=True):
+                        with st.spinner("Enviando para Google Sheets..."):
+                            sheets = GoogleSheetsIntegration()
+                            if sheets.is_connected():
+                                success, message = sheets.upload_daily_data(daily_data, CHANNELS[selected_channel]['name'])
+                                if success:
+                                    st.success(message)
+                                    st.info(f"🔗 [Abrir Planilha]({sheets.get_spreadsheet_url()})")
+                                else:
+                                    st.error(message)
+                            else:
+                                st.error(f"❌ Erro de conexão: {sheets.get_error()}")
+                                st.info("💡 Verifique as configurações de Secrets no Streamlit Cloud")
     
     st.markdown("---")
     
