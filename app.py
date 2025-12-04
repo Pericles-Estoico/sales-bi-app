@@ -436,31 +436,6 @@ else:
         with col2:
             st.dataframe(pareto_results.head(20), use_container_width=True, height=300)
     
-    #     with tab4:
-    #         st.subheader("📦 Projeção de Estoque")
-    #         
-    #         projection = StockProjection(df_filtered)
-    #         
-    #         col1, col2 = st.columns([1, 2])
-    #         
-    #         with col1:
-    #             horizon = st.selectbox("Horizonte", ["7 dias", "15 dias", "30 dias", "60 dias"])
-    #             confidence = st.slider("Confiança", 80, 99, 95)
-    #         
-    #         days = int(horizon.split()[0])
-    #         result = projection.project(days=days, confidence=confidence/100)
-    #         df_historical, df_projection = result
-    #         
-    #         fig = projection.plot_projection((df_historical, df_projection))
-    #         st.plotly_chart(fig, use_container_width=True)
-    #         
-    #         alerts = projection.get_alerts((df_historical, df_projection))
-    #         if not alerts.empty:
-    #             st.subheader("⚠️ Alertas")
-    #             for idx, alert in alerts.iterrows():
-    #                 if alert['Tipo'] == 'Crítico':
-    #                     st.error(f"🔴 {alert['Mensagem']}")
-    #                 else:
                     st.warning(f"🟡 {alert['Mensagem']}")
     
     with tab5:
