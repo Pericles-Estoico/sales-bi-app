@@ -333,36 +333,6 @@ else:
         st.metric("Total Período", f"{total_vendas:,.0f}")
     
     # Performance por canal
-                    f"{pct:.1f}%"
-                )
-    
-    st.markdown("---")
-    
-    # Tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📈 Visão Geral",
-        "🎯 Matriz BCG",
-        "📊 Pareto",
-        "📦 Projeção",
-        "🏪 Análise Multicanal"
-    ])
-    
-    with tab1:
-        st.subheader("📈 Visão Geral")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            df_time = df_filtered.groupby('Data')['Quantidade'].sum().reset_index()
-            fig = px.line(df_time, x='Data', y='Quantidade', title='Evolução de Vendas', markers=True)
-            fig.update_layout(hovermode='x unified')
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            top_products = df_filtered.groupby('Produto')['Quantidade'].sum().nlargest(10).reset_index()
-            fig = px.bar(top_products, x='Quantidade', y='Produto', orientation='h',
-                        title='Top 10 Produtos', color='Quantidade', color_continuous_scale='Blues')
-            st.plotly_chart(fig, use_container_width=True)
     
     with tab2:
         st.subheader("🎯 Matriz BCG")
