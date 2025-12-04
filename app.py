@@ -448,7 +448,8 @@ else:
             confidence = st.slider("Confiança", 80, 99, 95)
         
         days = int(horizon.split()[0])
-        df_historical, df_projection = projection.project(days=days, confidence=confidence/100)
+        result = projection.project(days=days, confidence=confidence/100)
+        df_historical, df_projection = result
         
         fig = projection.plot_projection((df_historical, df_projection))
         st.plotly_chart(fig, use_container_width=True)
