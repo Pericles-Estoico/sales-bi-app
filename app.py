@@ -6,172 +6,209 @@ from oauth2client.service_account import ServiceAccountCredentials
 import json
 
 st.set_page_config(page_title="Sales BI Analytics", page_icon="📊", layout="wide")
+st.title("📊 Sales BI Analytics - Análise Evolutiva")
+st.subheader("Histórico Acumulado com Storytelling")
 
-st.title("📊 Sales BI Analytics")
-st.subheader("Business Intelligence Executivo com Insights Acionáveis")
-
-CHANNELS = {
-    'geral': '📊 Vendas Gerais',
-    'mercado_livre': '🛒 Mercado Livre',
-    'shopee_matriz': '🛍️ Shopee Matriz',
-    'shopee_150': '🏪 Shopee 1:50',
-    'shein': '👗 Shein'
-}
+CHANNELS = {'geral': '📊 Vendas Gerais', 'mercado_livre': '🛒 Mercado Livre', 'shopee_matriz': '🛍️ Shopee Matriz', 'shopee_150': '🏪 Shopee 1:50', 'shein': '👗 Shein'}
 
 with st.sidebar:
     st.header("Upload de Vendas")
-    canal = st.selectbox("Selecione o Canal", list(CHANNELS.keys()), format_func=lambda x: CHANNELS[x])
+    canal = st.selectbox("Canal", list(CHANNELS.keys()), format_func=lambda x: CHANNELS[x])
     uploaded_file = st.file_uploader("Planilha Excel", type=['xlsx', 'xls'])
-    
-    if uploaded_file and st.button("🔄 Processar"):
-        df = pd.read_excel(uploaded_file)
-        df['Canal'] = CHANNELS[canal]
-        st.session_state['data'] = df
-        st.success(f"✅ {len(df)} registros carregados!")
+    if uploaded_file and st.button("🔄 Processar e Adicionar"):
+        df_novo = pd.read_excel(uploaded_file)
+        df_novo['Canal'] = CHANNELS[canal]
+        df_novo['Data_Upload'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        st.session_state['data_novo'] = df_novo
+        st.success(f"✅ {len(df_novo)} novos registros carregados!")
 
-if 'data' in st.session_state and not st.session_state['data'].empty:
-    df = st.session_state['data']
+if 'data_novo' in st.session_state:
+    df_novo = st.session_state['data_novo']
     
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total Vendas", f"R$ {df['Total'].sum():,.2f}")
-    col2.metric("Produtos", len(df))
-    col3.metric("Unidades", int(df['Quantidade'].sum()))
-    col4.metric("Ticket Médio", f"R$ {df['Total'].sum() / df['Quantidade'].sum():,.2f}")
+    st.header("📤 Enviar para Google Sheets (Modo Acumulado)")
+    st.info("Os novos dados serão **adicionados** aos existentes, mantendo histórico completo")
     
-    st.header("📈 Matriz BCG")
-    total_geral = df['Total'].sum()
-    produtos = df.groupby('Produto').agg({'Quantidade': 'sum', 'Total': 'sum'}).reset_index()
-    produtos['Participacao'] = (produtos['Total'] / total_geral) * 100
-    
-    # Lógica BCG melhorada
-    qtd_mediana = produtos['Quantidade'].median()
-    part_mediana = produtos['Participacao'].median()
-    
-    def classificar_bcg(row):
-        crescimento_alto = row['Quantidade'] >= qtd_mediana
-        participacao_alta = row['Participacao'] >= part_mediana
-        
-        if crescimento_alto and participacao_alta:
-            return 'Estrela'
-        elif not crescimento_alto and participacao_alta:
-            return 'Vaca Leiteira'
-        elif crescimento_alto and not participacao_alta:
-            return 'Interrogação'
-        else:
-            return 'Abacaxi'
-    
-    produtos['Categoria'] = produtos.apply(classificar_bcg, axis=1)
-    
-    col1, col2, col3, col4 = st.columns(4)
-    for col, cat, emoji, cor in zip([col1, col2, col3, col4], 
-                                     ['Estrela', 'Vaca Leiteira', 'Interrogação', 'Abacaxi'],
-                                     ['⭐', '🐄', '❓', '🍍'],
-                                     ['#FFD700', '#32CD32', '#1E90FF', '#FF6347']):
-        with col:
-            prods = produtos[produtos['Categoria'] == cat]
-            st.markdown(f"### {emoji} {cat}")
-            st.metric("Produtos", len(prods))
-            st.metric("Faturamento", f"R$ {prods['Total'].sum():,.0f}")
-            if len(prods) > 0:
-                st.dataframe(prods[['Produto', 'Quantidade']].head(5), hide_index=True, height=200)
-    
-    # Insights BCG
-    st.info(f"""
-    💡 **Insights Executivos**:
-    - **Estrelas** ({len(produtos[produtos['Categoria']=='Estrela'])}): Alto volume + Alta receita → Invista em marketing
-    - **Vacas Leiteiras** ({len(produtos[produtos['Categoria']=='Vaca Leiteira'])}): Baixo volume + Alta receita → Mantenha estoque
-    - **Interrogações** ({len(produtos[produtos['Categoria']=='Interrogação'])}): Alto volume + Baixa receita → Aumente preço ou descontinue
-    - **Abacaxis** ({len(produtos[produtos['Categoria']=='Abacaxi'])}): Baixo volume + Baixa receita → Liquidar estoque
-    """)
-    
-    st.header("🎯 Análise Pareto 80/20")
-    produtos_sorted = produtos.sort_values('Total', ascending=False)
-    produtos_sorted['Acumulado'] = produtos_sorted['Total'].cumsum() / produtos_sorted['Total'].sum()
-    pareto_80 = produtos_sorted[produtos_sorted['Acumulado'] <= 0.8]
-    
-    st.success(f"💡 **Regra 80/20 Confirmada**: {len(pareto_80)} produtos ({len(pareto_80)/len(produtos)*100:.0f}%) geram 80% das vendas (R$ {pareto_80['Total'].sum():,.2f})")
-    st.dataframe(pareto_80[['Produto', 'Quantidade', 'Total', 'Categoria']], hide_index=True)
-    
-    st.header("📤 Exportar para Google Sheets")
-    
-    # Verificar se secrets existem
-    has_credentials = 'GOOGLE_SHEETS_CREDENTIALS' in st.secrets
-    has_url = 'GOOGLE_SHEETS_URL' in st.secrets
-    
-    if not has_credentials or not has_url:
-        st.warning("⚠️ Configure os Secrets primeiro:")
-        st.code("""
-# No Streamlit Cloud:
-# 1. Vá em Settings > Secrets
-# 2. Adicione:
-
-GOOGLE_SHEETS_URL = "https://docs.google.com/spreadsheets/d/SEU_ID_AQUI/edit"
-
-GOOGLE_SHEETS_CREDENTIALS = '''
-{
-  "type": "service_account",
-  "project_id": "seu-projeto",
-  "private_key_id": "...",
-  "private_key": "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n",
-  "client_email": "seu-email@seu-projeto.iam.gserviceaccount.com",
-  "client_id": "...",
-  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-  "token_uri": "https://oauth2.googleapis.com/token",
-  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-  "client_x509_cert_url": "..."
-}
-'''
-        """, language='toml')
-        
-        with st.expander("📖 Como criar Service Account do Google"):
-            st.markdown("""
-            1. Acesse [Google Cloud Console](https://console.cloud.google.com/)
-            2. Crie um projeto novo
-            3. Ative a API do Google Sheets
-            4. Vá em **IAM & Admin** > **Service Accounts**
-            5. Clique **Create Service Account**
-            6. Dê um nome e clique **Create**
-            7. Clique em **Keys** > **Add Key** > **Create new key** > **JSON**
-            8. Baixe o arquivo JSON
-            9. Copie o conteúdo e cole em `GOOGLE_SHEETS_CREDENTIALS`
-            10. Compartilhe sua planilha com o email da service account
-            """)
-    
-    if st.button("Enviar para Google Sheets", disabled=not (has_credentials and has_url)):
+    if st.button("Enviar e Analisar Histórico Completo"):
         try:
             scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-            creds_dict = json.loads(st.secrets["GOOGLE_SHEETS_CREDENTIALS"])
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-            client = gspread.authorize(creds)
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(st.secrets["GOOGLE_SHEETS_CREDENTIALS"]), scope)
+            spreadsheet = gspread.authorize(creds).open_by_url(st.secrets["GOOGLE_SHEETS_URL"])
             
-            sheet = client.open_by_url(st.secrets["GOOGLE_SHEETS_URL"]).sheet1
+            # Ler dados existentes
+            try:
+                sheet_detalhes = spreadsheet.worksheet("6. Detalhes")
+                dados_existentes = sheet_detalhes.get_all_values()
+                if len(dados_existentes) > 1:
+                    df_existente = pd.DataFrame(dados_existentes[1:], columns=dados_existentes[0])
+                    df_existente['Quantidade'] = pd.to_numeric(df_existente['Quantidade'], errors='coerce')
+                    df_existente['Total'] = pd.to_numeric(df_existente['Total'], errors='coerce')
+                else:
+                    df_existente = pd.DataFrame()
+            except:
+                df_existente = pd.DataFrame()
+                sheet_detalhes = spreadsheet.add_worksheet("6. Detalhes", 5000, 10)
             
-            sheet.clear()
-            sheet.append_row(['Data', 'Produto', 'Quantidade', 'Preço Unitário', 'Total', 'Canal', 'Categoria BCG'])
+            # Combinar dados
+            df_completo = pd.concat([df_existente, df_novo], ignore_index=True) if not df_existente.empty else df_novo
             
-            for _, row in df.iterrows():
-                cat_bcg = produtos[produtos['Produto'] == row['Produto']]['Categoria'].values[0] if row['Produto'] in produtos['Produto'].values else 'N/A'
-                sheet.append_row([
+            total_vendas = df_completo['Total'].sum()
+            produtos = df_completo.groupby('Produto').agg({'Quantidade': 'sum', 'Total': 'sum'}).reset_index()
+            produtos['Participacao'] = (produtos['Total'] / total_vendas) * 100
+            
+            qtd_mediana = produtos['Quantidade'].median()
+            part_mediana = produtos['Participacao'].median()
+            
+            def classificar_bcg(row):
+                if row['Quantidade'] >= qtd_mediana and row['Participacao'] >= part_mediana: return 'Estrela'
+                elif row['Quantidade'] < qtd_mediana and row['Participacao'] >= part_mediana: return 'Vaca Leiteira'
+                elif row['Quantidade'] >= qtd_mediana and row['Participacao'] < part_mediana: return 'Interrogação'
+                else: return 'Abacaxi'
+            
+            produtos['Categoria'] = produtos.apply(classificar_bcg, axis=1)
+            
+            # Análise por data
+            if 'Data' in df_completo.columns:
+                df_completo['Data'] = pd.to_datetime(df_completo['Data'], errors='coerce')
+                vendas_por_dia = df_completo.groupby('Data').agg({'Total': 'sum', 'Quantidade': 'sum'}).reset_index()
+                vendas_por_dia = vendas_por_dia.sort_values('Data')
+            
+            # 1. Dashboard Executivo
+            try: sheet1 = spreadsheet.worksheet("1. Dashboard Executivo")
+            except: sheet1 = spreadsheet.add_worksheet("1. Dashboard Executivo", 100, 5)
+            sheet1.clear()
+            
+            dias_analisados = len(df_completo['Data'].unique()) if 'Data' in df_completo.columns else 1
+            
+            sheet1.append_rows([
+                ['DASHBOARD EXECUTIVO - HISTÓRICO COMPLETO'],
+                [f'Atualizado em: {datetime.now().strftime("%d/%m/%Y %H:%M")}'],
+                [],
+                ['PERÍODO TOTAL ANALISADO'],
+                ['Dias com Vendas', dias_analisados],
+                ['Total Acumulado', f'R$ {total_vendas:,.2f}'],
+                ['Produtos Únicos', len(produtos)],
+                ['Unidades Totais', int(df_completo['Quantidade'].sum())],
+                ['Ticket Médio Geral', f'R$ {total_vendas / df_completo["Quantidade"].sum():,.2f}'],
+                [],
+                ['MATRIZ BCG - HISTÓRICO COMPLETO'],
+                ['Categoria', 'Produtos', 'Faturamento Total'],
+                ['⭐ Estrelas', len(produtos[produtos['Categoria']=='Estrela']), f'R$ {produtos[produtos["Categoria"]=="Estrela"]["Total"].sum():,.2f}'],
+                ['🐄 Vacas Leiteiras', len(produtos[produtos['Categoria']=='Vaca Leiteira']), f'R$ {produtos[produtos["Categoria"]=="Vaca Leiteira"]["Total"].sum():,.2f}'],
+                ['❓ Interrogações', len(produtos[produtos['Categoria']=='Interrogação']), f'R$ {produtos[produtos["Categoria"]=="Interrogação"]["Total"].sum():,.2f}'],
+                ['🍍 Abacaxis', len(produtos[produtos['Categoria']=='Abacaxi']), f'R$ {produtos[produtos["Categoria"]=="Abacaxi"]["Total"].sum():,.2f}']
+            ])
+            
+            # 2. Evolução Temporal
+            try: sheet2 = spreadsheet.worksheet("2. Evolução Temporal")
+            except: sheet2 = spreadsheet.add_worksheet("2. Evolução Temporal", 500, 6)
+            sheet2.clear()
+            sheet2.append_row(['EVOLUÇÃO DIA A DIA'])
+            sheet2.append_row([])
+            if 'Data' in df_completo.columns and not vendas_por_dia.empty:
+                sheet2.append_row(['Data', 'Faturamento', 'Unidades', 'Ticket Médio', 'Crescimento %'])
+                for i, row in vendas_por_dia.iterrows():
+                    crescimento = ''
+                    if i > 0:
+                        anterior = vendas_por_dia.iloc[i-1]['Total']
+                        crescimento = f'{((row["Total"] - anterior) / anterior * 100):.1f}%' if anterior > 0 else 'N/A'
+                    sheet2.append_row([
+                        row['Data'].strftime('%d/%m/%Y'),
+                        f'R$ {row["Total"]:,.2f}',
+                        int(row['Quantidade']),
+                        f'R$ {row["Total"] / row["Quantidade"]:.2f}',
+                        crescimento
+                    ])
+            
+            # 3. Análise BCG
+            try: sheet3 = spreadsheet.worksheet("3. Análise BCG")
+            except: sheet3 = spreadsheet.add_worksheet("3. Análise BCG", 500, 5)
+            sheet3.clear()
+            sheet3.append_row(['MATRIZ BCG - ANÁLISE DETALHADA'])
+            sheet3.append_row([])
+            for cat in ['Estrela', 'Vaca Leiteira', 'Interrogação', 'Abacaxi']:
+                prods = produtos[produtos['Categoria'] == cat]
+                sheet3.append_row([f'{cat.upper()} ({len(prods)} produtos)'])
+                sheet3.append_row(['Produto', 'Qtd Total', 'Faturamento', '% Participação'])
+                for _, p in prods.iterrows():
+                    sheet3.append_row([p['Produto'], int(p['Quantidade']), f'R$ {p["Total"]:.2f}', f'{p["Participacao"]:.2f}%'])
+                sheet3.append_row([])
+            
+            # 4. Pareto
+            produtos_sorted = produtos.sort_values('Total', ascending=False)
+            produtos_sorted['Acumulado'] = produtos_sorted['Total'].cumsum() / produtos_sorted['Total'].sum()
+            pareto_80 = produtos_sorted[produtos_sorted['Acumulado'] <= 0.8]
+            
+            try: sheet4 = spreadsheet.worksheet("4. Pareto 80-20")
+            except: sheet4 = spreadsheet.add_worksheet("4. Pareto 80-20", 500, 6)
+            sheet4.clear()
+            sheet4.append_row(['ANÁLISE PARETO 80/20 - HISTÓRICO COMPLETO'])
+            sheet4.append_row([])
+            sheet4.append_row([f'✅ {len(pareto_80)} produtos ({len(pareto_80)/len(produtos)*100:.1f}%) geram 80% das vendas'])
+            sheet4.append_row([f'💰 Representam R$ {pareto_80["Total"].sum():,.2f} do total'])
+            sheet4.append_row([])
+            sheet4.append_row(['Ranking', 'Produto', 'Quantidade', 'Faturamento', '% Acumulado', 'Categoria BCG'])
+            for i, (_, p) in enumerate(pareto_80.iterrows(), 1):
+                sheet4.append_row([i, p['Produto'], int(p['Quantidade']), f'R$ {p["Total"]:.2f}', f'{p["Acumulado"]*100:.1f}%', p['Categoria']])
+            
+            # 5. Recomendações CEO
+            try: sheet5 = spreadsheet.worksheet("5. Recomendações CEO")
+            except: sheet5 = spreadsheet.add_worksheet("5. Recomendações CEO", 100, 3)
+            sheet5.clear()
+            
+            estrelas = len(produtos[produtos['Categoria']=='Estrela'])
+            vacas = len(produtos[produtos['Categoria']=='Vaca Leiteira'])
+            interrogacoes = len(produtos[produtos['Categoria']=='Interrogação'])
+            abacaxis = len(produtos[produtos['Categoria']=='Abacaxi'])
+            
+            sheet5.append_rows([
+                ['RECOMENDAÇÕES ESTRATÉGICAS CEO'],
+                [f'Baseado em {dias_analisados} dias de vendas'],
+                [],
+                ['PRIORIDADE', 'AÇÃO RECOMENDADA', 'IMPACTO ESPERADO'],
+                ['🔴 CRÍTICA', f'Investir pesado nas {estrelas} Estrelas', f'Potencial de crescimento: +30% em receita'],
+                ['🟡 ALTA', f'Manter operação das {vacas} Vacas Leiteiras', 'Fluxo de caixa estável garantido'],
+                ['🟠 MÉDIA', f'Revisar estratégia de {interrogacoes} Interrogações', 'Reduzir custos ou aumentar margem'],
+                ['🔴 CRÍTICA', f'Liquidar {abacaxis} Abacaxis IMEDIATAMENTE', 'Liberar capital de giro'],
+                [],
+                ['FOCO ESTRATÉGICO'],
+                [f'Concentrar 80% dos esforços nos {len(pareto_80)} produtos Pareto'],
+                [f'Eles já geram R$ {pareto_80["Total"].sum():,.2f} ({pareto_80["Total"].sum()/total_vendas*100:.0f}% do total)'],
+                [],
+                ['PRÓXIMOS PASSOS'],
+                ['1. Aumentar estoque das Estrelas em 50%'],
+                ['2. Criar promoções para Interrogações (teste de preço)'],
+                ['3. Desconto de 70% nos Abacaxis (liquidação total)'],
+                [f'4. Monitorar evolução diária (já temos {dias_analisados} dias de histórico)']
+            ])
+            
+            # 6. Detalhes (Acumular dados)
+            sheet_detalhes.clear()
+            sheet_detalhes.append_row(['Data', 'Produto', 'Quantidade', 'Preço Unit', 'Total', 'Canal', 'Categoria BCG', 'Data Upload'])
+            for _, row in df_completo.iterrows():
+                cat = produtos[produtos['Produto'] == row['Produto']]['Categoria'].values[0] if row['Produto'] in produtos['Produto'].values else 'N/A'
+                sheet_detalhes.append_row([
                     str(row.get('Data', '')),
                     row['Produto'],
-                    int(row['Quantidade']),
-                    float(row['Preço Unitário']),
-                    float(row['Total']),
-                    row['Canal'],
-                    cat_bcg
+                    int(row['Quantidade']) if pd.notna(row['Quantidade']) else 0,
+                    float(row['Preço Unitário']) if pd.notna(row.get('Preço Unitário', 0)) else 0,
+                    float(row['Total']) if pd.notna(row['Total']) else 0,
+                    row.get('Canal', ''),
+                    cat,
+                    row.get('Data_Upload', '')
                 ])
             
-            st.success("✅ Dados enviados com sucesso!")
+            st.success(f"✅ Análise completa! {len(df_completo)} registros totais ({len(df_novo)} novos)")
+            st.info(f"📊 Histórico: {dias_analisados} dias analisados")
             st.info(f"🔗 [Abrir Planilha]({st.secrets['GOOGLE_SHEETS_URL']})")
+            
         except Exception as e:
             st.error(f"❌ Erro: {str(e)}")
-
 else:
-    st.info("👈 Faça upload de uma planilha na barra lateral para começar")
+    st.info("👈 Faça upload da planilha do dia")
     st.markdown("""
-    ### O que você terá acesso:
-    - 📈 **Matriz BCG**: Classificação automática (Estrela, Vaca Leiteira, Interrogação, Abacaxi)
-    - 🎯 **Análise Pareto**: Identifica os 20% de produtos que geram 80% das vendas
-    - 💡 **Insights Executivos**: Recomendações acionáveis para cada categoria
-    - 📤 **Google Sheets**: Exportação automática com categoria BCG
+    ### Como funciona:
+    1. **Primeiro dia**: Upload da planilha → Cria análise inicial
+    2. **Dias seguintes**: Upload de novos dados → **Acumula** com anteriores
+    3. **Histórico completo**: Análise evolutiva dia a dia
+    4. **Recomendações CEO**: Baseadas em todo o período
     """)
