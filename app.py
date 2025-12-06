@@ -97,6 +97,11 @@ if 'data_novo' in st.session_state:
                     df_existente = pd.DataFrame()
             except:
                 df_existente = pd.DataFrame()
+            
+            # Garantir que a aba existe
+            try:
+                sheet_detalhes = spreadsheet.worksheet("6. Detalhes")
+            except:
                 sheet_detalhes = spreadsheet.add_worksheet("6. Detalhes", 5000, 10)
             
             df_completo = pd.concat([df_existente, df_novo], ignore_index=True) if not df_existente.empty else df_novo
