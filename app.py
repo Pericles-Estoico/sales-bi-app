@@ -6,55 +6,41 @@ from oauth2client.service_account import ServiceAccountCredentials
 import json
 
 st.set_page_config(page_title="Sales BI Analytics", page_icon="📊", layout="wide")
-st.title("📊 Sales BI Analytics - Análise Completa")
+st.title("📊 Sales BI Analytics")
 
 CHANNELS = {'geral': '📊 Vendas Gerais', 'mercado_livre': '🛒 Mercado Livre', 'shopee_matriz': '🛍️ Shopee Matriz', 'shopee_150': '🏪 Shopee 1:50', 'shein': '👗 Shein'}
 
 def converter_planilha_bling(df_bling, data_venda):
-    df_convertido = pd.DataFrame()
-    df_convertido['Data'] = data_venda
-    df_convertido['Produto'] = df_bling['Código']
-    df_convertido['Quantidade'] = df_bling['Quantidade']
-    df_convertido['Total'] = df_bling['Valor'].apply(lambda x: 
-        float(str(x).replace('R$', '').replace('.', '').replace(',', '.').strip())
-    )
-    df_convertido['Preço Unitário'] = df_convertido['Total'] / df_convertido['Quantidade']
-    return df_convertido
+    df = pd.DataFrame()
+    df['Data'] = data_venda
+    df['Produto'] = df_bling['Código']
+    df['Quantidade'] = df_bling['Quantidade']
+    df['Total'] = df_bling['Valor'].apply(lambda x: float(str(x).replace('R$','').replace('.','').replace(',','.').strip()))
+    df['Preço Unitário'] = df['Total'] / df['Quantidade']
+    return df
 
 with st.sidebar:
-    st.header("⚙️ Configurações")
-    
-    # Upload JSON de configurações
-    config_file = st.file_uploader("📋 Config. Produtos/Canais (JSON)", type=['json'])
+    st.header("⚙️ Config")
+    config_file = st.file_uploader("📋 Produtos/Canais (Excel)", type=['xlsx','xls'])
     if config_file:
-        config = json.load(config_file)
-        st.session_state['config'] = config
-        st.success("✅ Configurações carregadas")
-        
-        # Mostrar resumo
-        if 'produtos' in config:
-            st.metric("Produtos cadastrados", len(config['produtos']))
-        if 'canais' in config:
-            st.metric("Canais configurados", len(config['canais']))
+        produtos_df = pd.read_excel(config_file, sheet_name='Produtos')
+        canais_df = pd.read_excel(config_file, sheet_name='Canais')
+        st.session_state['produtos_config'] = produtos_df
+        st.session_state['canais_config'] = canais_df
+        st.success(f"✅ {len(produtos_df)} produtos")
     
     st.divider()
-    st.header("📤 Upload de Vendas")
-    
+    st.header("📤 Vendas")
     formato = st.radio("Formato", ['Bling', 'Padrão'])
     canal = st.selectbox("Canal", list(CHANNELS.keys()), format_func=lambda x: CHANNELS[x])
-    
     if formato == 'Bling':
-        data_venda = st.date_input("Data da Venda", datetime.now())
-    
-    uploaded_file = st.file_uploader("Planilha Excel", type=['xlsx', 'xls'])
+        data_venda = st.date_input("Data", datetime.now())
+    uploaded_file = st.file_uploader("Excel", type=['xlsx','xls'])
     
     if uploaded_file and st.button("🔄 Processar"):
         try:
             df_original = pd.read_excel(uploaded_file)
-            colunas = df_original.columns.tolist()
-            
-            if 'Código' in colunas and 'Valor' in colunas:
-                st.info("✅ Formato Bling detectado")
+            if 'Código' in df_original.columns:
                 df_novo = converter_planilha_bling(df_original, data_venda.strftime('%Y-%m-%d'))
             else:
                 df_novo = df_original.copy()
@@ -62,277 +48,158 @@ with st.sidebar:
             df_novo['Canal'] = CHANNELS[canal]
             df_novo['Data_Upload'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             
-            # Enriquecer com configurações
-            if 'config' in st.session_state:
-                config = st.session_state['config']
+            # Enriquecer com config
+            if 'produtos_config' in st.session_state:
+                prod_config = st.session_state['produtos_config']
+                prod_dict = dict(zip(prod_config['Código'], prod_config['Custo (R$)']))
+                preco_dict = dict(zip(prod_config['Código'], prod_config['Preço Venda (R$)']))
                 
-                # Adicionar custo e margem
-                if 'produtos' in config:
-                    produtos_config = {p['nome']: p for p in config['produtos']}
-                    df_novo['Custo_Unit'] = df_novo['Produto'].apply(
-                        lambda x: produtos_config.get(x, {}).get('custo', 0)
-                    )
-                    df_novo['Custo_Total'] = df_novo['Custo_Unit'] * df_novo['Quantidade']
-                    df_novo['Margem_Bruta'] = df_novo['Total'] - df_novo['Custo_Total']
+                df_novo['Custo_Unit'] = df_novo['Produto'].map(prod_dict).fillna(0)
+                df_novo['Preco_Cadastrado'] = df_novo['Produto'].map(preco_dict).fillna(0)
+                df_novo['Custo_Total'] = df_novo['Custo_Unit'] * df_novo['Quantidade']
+                df_novo['Margem_Bruta'] = df_novo['Total'] - df_novo['Custo_Total']
                 
-                # Adicionar taxas do canal
-                if 'canais' in config:
-                    canais_config = {c['nome']: c for c in config['canais']}
-                    canal_info = canais_config.get(CHANNELS[canal], {})
-                    taxa_var = canal_info.get('taxa_variavel', 0) / 100
-                    taxa_fixa = canal_info.get('taxa_fixa', 0)
-                    
-                    df_novo['Taxa_Variavel'] = df_novo['Total'] * taxa_var
-                    df_novo['Taxa_Fixa'] = taxa_fixa
-                    df_novo['Lucro_Liquido'] = df_novo['Margem_Bruta'] - df_novo['Taxa_Variavel'] - df_novo['Taxa_Fixa']
+                # VALIDAÇÃO DE PREÇO
+                df_novo['Preco_Real'] = df_novo['Preço Unitário']
+                df_novo['Divergencia_%'] = ((df_novo['Preco_Real'] - df_novo['Preco_Cadastrado']) / df_novo['Preco_Cadastrado'] * 100).fillna(0)
+                
+                # Alertas
+                divergencias = df_novo[abs(df_novo['Divergencia_%']) > 5]
+                if len(divergencias) > 0:
+                    st.warning(f"⚠️ {len(divergencias)} produtos com preço divergente (>5%)")
+            
+            if 'canais_config' in st.session_state:
+                canal_df = st.session_state['canais_config']
+                canal_info = canal_df[canal_df['Canal'] == canal.replace('_',' ').title()].iloc[0] if len(canal_df[canal_df['Canal'] == canal.replace('_',' ').title()]) > 0 else None
+                if canal_info is not None:
+                    taxa_mkt = canal_info['Taxa Marketplace (%)'] / 100
+                    df_novo['Taxa_Marketplace'] = df_novo['Total'] * taxa_mkt
+                    df_novo['Taxa_Fixa'] = canal_info['Taxa Fixa por Pedido (R$)'] / len(df_novo)
+                    df_novo['Taxa_Gateway'] = canal_info['Taxa Gateway (R$)'] / len(df_novo)
+                    df_novo['Lucro_Liquido'] = df_novo['Margem_Bruta'] - df_novo['Taxa_Marketplace'] - df_novo['Taxa_Fixa'] - df_novo['Taxa_Gateway']
             
             st.session_state['data_novo'] = df_novo
+            st.dataframe(df_novo.head())
             
-            st.subheader("Preview")
-            st.dataframe(df_novo.head(10))
-            
-            col1, col2, col3 = st.columns(3)
+            col1,col2,col3 = st.columns(3)
             col1.metric("Produtos", len(df_novo))
             col2.metric("Faturamento", f"R$ {df_novo['Total'].sum():,.2f}")
             if 'Lucro_Liquido' in df_novo.columns:
-                col3.metric("Lucro Líquido", f"R$ {df_novo['Lucro_Liquido'].sum():,.2f}")
-            
+                col3.metric("Lucro", f"R$ {df_novo['Lucro_Liquido'].sum():,.2f}")
         except Exception as e:
-            st.error(f"❌ {str(e)}")
+            st.error(f"❌ {e}")
 
 if 'data_novo' in st.session_state:
-    df_novo = st.session_state['data_novo']
-    
-    if st.button("📤 Enviar para Google Sheets"):
+    if st.button("📤 Enviar"):
         try:
-            scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+            df_novo = st.session_state['data_novo']
+            scope = ['https://spreadsheets.google.com/feeds','https://www.googleapis.com/auth/drive']
             creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(st.secrets["GOOGLE_SHEETS_CREDENTIALS"]), scope)
-            spreadsheet = gspread.authorize(creds).open_by_url(st.secrets["GOOGLE_SHEETS_URL"])
+            ss = gspread.authorize(creds).open_by_url(st.secrets["GOOGLE_SHEETS_URL"])
             
-            # Ler dados existentes
+            # Ler existente
             try:
-                sheet_detalhes = spreadsheet.worksheet("6. Detalhes")
-                dados_existentes = sheet_detalhes.get_all_values()
-                if len(dados_existentes) > 1:
-                    df_existente = pd.DataFrame(dados_existentes[1:], columns=dados_existentes[0])
-                    for col in ['Quantidade', 'Total', 'Custo_Total', 'Margem_Bruta', 'Lucro_Liquido']:
-                        if col in df_existente.columns:
-                            df_existente[col] = pd.to_numeric(df_existente[col], errors='coerce')
-                else:
-                    df_existente = pd.DataFrame()
+                sh = ss.worksheet("6. Detalhes")
+                ex = sh.get_all_values()
+                df_ex = pd.DataFrame(ex[1:], columns=ex[0]) if len(ex)>1 else pd.DataFrame()
+                for c in ['Quantidade','Total','Custo_Total','Margem_Bruta','Lucro_Liquido']:
+                    if c in df_ex.columns: df_ex[c] = pd.to_numeric(df_ex[c], errors='coerce')
             except:
-                df_existente = pd.DataFrame()
+                df_ex = pd.DataFrame()
             
-            try:
-                sheet_detalhes = spreadsheet.worksheet("6. Detalhes")
-            except:
-                sheet_detalhes = spreadsheet.add_worksheet("6. Detalhes", 5000, 15)
+            try: sh = ss.worksheet("6. Detalhes")
+            except: sh = ss.add_worksheet("6. Detalhes", 5000, 20)
             
-            df_completo = pd.concat([df_existente, df_novo], ignore_index=True) if not df_existente.empty else df_novo
+            df_full = pd.concat([df_ex, df_novo], ignore_index=True) if not df_ex.empty else df_novo
             
-            # Análise de produtos
-            agg_dict = {'Quantidade': 'sum', 'Total': 'sum'}
-            if 'Custo_Total' in df_completo.columns:
-                agg_dict['Custo_Total'] = 'sum'
-                agg_dict['Margem_Bruta'] = 'sum'
-            if 'Lucro_Liquido' in df_completo.columns:
-                agg_dict['Lucro_Liquido'] = 'sum'
+            # Análise
+            agg = {'Quantidade':'sum','Total':'sum'}
+            if 'Custo_Total' in df_full.columns: agg.update({'Custo_Total':'sum','Margem_Bruta':'sum'})
+            if 'Lucro_Liquido' in df_full.columns: agg['Lucro_Liquido'] = 'sum'
             
-            produtos = df_completo.groupby('Produto').agg(agg_dict).reset_index()
+            prods = df_full.groupby('Produto').agg(agg).reset_index()
+            total = prods['Total'].sum()
+            prods['Part%'] = (prods['Total']/total)*100
             
-            total_vendas = produtos['Total'].sum()
-            produtos['Participacao'] = (produtos['Total'] / total_vendas) * 100
+            med_q = prods['Quantidade'].median()
+            med_p = prods['Part%'].median()
             
-            qtd_mediana = produtos['Quantidade'].median()
-            part_mediana = produtos['Participacao'].median()
-            
-            def classificar_bcg(row):
-                if row['Quantidade'] >= qtd_mediana and row['Participacao'] >= part_mediana: return 'Estrela'
-                elif row['Quantidade'] < qtd_mediana and row['Participacao'] >= part_mediana: return 'Vaca Leiteira'
-                elif row['Quantidade'] >= qtd_mediana and row['Participacao'] < part_mediana: return 'Interrogação'
+            def bcg(r):
+                if r['Quantidade']>=med_q and r['Part%']>=med_p: return 'Estrela'
+                elif r['Quantidade']<med_q and r['Part%']>=med_p: return 'Vaca Leiteira'
+                elif r['Quantidade']>=med_q and r['Part%']<med_p: return 'Interrogação'
                 else: return 'Abacaxi'
             
-            produtos['Categoria'] = produtos.apply(classificar_bcg, axis=1)
+            prods['BCG'] = prods.apply(bcg, axis=1)
             
-            if 'Data' in df_completo.columns:
-                df_completo['Data'] = pd.to_datetime(df_completo['Data'], errors='coerce')
-                vendas_por_dia = df_completo.groupby('Data').agg({'Total': 'sum', 'Quantidade': 'sum'}).reset_index().sort_values('Data')
+            if 'Data' in df_full.columns:
+                df_full['Data'] = pd.to_datetime(df_full['Data'], errors='coerce')
+                dias_df = df_full.groupby('Data').agg({'Total':'sum','Quantidade':'sum'}).reset_index().sort_values('Data')
             
-            dias_analisados = len(df_completo['Data'].unique()) if 'Data' in df_completo.columns else 1
+            dias = len(df_full['Data'].unique()) if 'Data' in df_full.columns else 1
             
-            # 1. Dashboard Executivo
-            try: sheet1 = spreadsheet.worksheet("1. Dashboard")
-            except: sheet1 = spreadsheet.add_worksheet("1. Dashboard", 100, 5)
-            
-            lucro_total = produtos['Lucro_Liquido'].sum() if 'Lucro_Liquido' in produtos.columns else 0
-            margem_total = produtos['Margem_Bruta'].sum() if 'Margem_Bruta' in produtos.columns else 0
-            
-            dados1 = [
-                ['DASHBOARD EXECUTIVO'],
-                [f'Atualizado: {datetime.now().strftime("%d/%m/%Y %H:%M")}'],
-                [],
-                ['PERÍODO TOTAL'],
-                ['Dias', dias_analisados],
-                ['Faturamento', f'R$ {total_vendas:,.2f}'],
-                ['Margem Bruta', f'R$ {margem_total:,.2f}'],
-                ['Lucro Líquido', f'R$ {lucro_total:,.2f}'],
-                ['Produtos', len(produtos)],
-                ['Unidades', int(df_completo['Quantidade'].sum())],
-                [],
-                ['MATRIZ BCG'],
-                ['Categoria', 'Qtd', 'Faturamento', 'Lucro']
-            ]
-            
-            for cat in ['Estrela', 'Vaca Leiteira', 'Interrogação', 'Abacaxi']:
-                prods_cat = produtos[produtos['Categoria']==cat]
-                lucro_cat = prods_cat['Lucro_Liquido'].sum() if 'Lucro_Liquido' in prods_cat.columns else 0
-                emoji = {'Estrela': '⭐', 'Vaca Leiteira': '🐄', 'Interrogação': '❓', 'Abacaxi': '🍍'}[cat]
-                dados1.append([
-                    f'{emoji} {cat}',
-                    len(prods_cat),
-                    f'R$ {prods_cat["Total"].sum():,.2f}',
-                    f'R$ {lucro_cat:,.2f}'
-                ])
-            
-            sheet1.clear()
-            sheet1.update('A1', dados1)
-            
-            # 2. Evolução
-            try: sheet2 = spreadsheet.worksheet("2. Evolução")
-            except: sheet2 = spreadsheet.add_worksheet("2. Evolução", 500, 5)
-            
-            dados2 = [['EVOLUÇÃO DIA A DIA'], [], ['Data', 'Faturamento', 'Unidades', 'Crescimento %']]
-            if 'Data' in df_completo.columns and not vendas_por_dia.empty:
-                for i, row in vendas_por_dia.iterrows():
-                    crescimento = ''
-                    if i > 0:
-                        anterior = vendas_por_dia.iloc[i-1]['Total']
-                        crescimento = f'{((row["Total"] - anterior) / anterior * 100):.1f}%' if anterior > 0 else 'N/A'
-                    dados2.append([row['Data'].strftime('%d/%m/%Y'), f'R$ {row["Total"]:,.2f}', int(row['Quantidade']), crescimento])
-            sheet2.clear()
-            sheet2.update('A1', dados2)
-            
-            # 3. BCG
-            try: sheet3 = spreadsheet.worksheet("3. BCG")
-            except: sheet3 = spreadsheet.add_worksheet("3. BCG", 500, 6)
-            
-            dados3 = [['MATRIZ BCG'], []]
-            for cat in ['Estrela', 'Vaca Leiteira', 'Interrogação', 'Abacaxi']:
-                prods = produtos[produtos['Categoria'] == cat].head(20)
-                dados3.append([f'{cat.upper()} ({len(produtos[produtos["Categoria"]==cat])})'])
+            # DIVERGÊNCIAS
+            if 'Divergencia_%' in df_full.columns:
+                diverg = df_full[abs(df_full['Divergencia_%'])>5][['Produto','Preco_Cadastrado','Preco_Real','Divergencia_%']].drop_duplicates()
+                try: sh_div = ss.worksheet("7. Divergencias")
+                except: sh_div = ss.add_worksheet("7. Divergencias", 200, 5)
                 
-                if 'Lucro_Liquido' in prods.columns:
-                    dados3.append(['Produto', 'Qtd', 'Faturamento', 'Lucro', '% Part'])
-                    for _, p in prods.iterrows():
-                        dados3.append([p['Produto'], int(p['Quantidade']), f'R$ {p["Total"]:.2f}', f'R$ {p["Lucro_Liquido"]:.2f}', f'{p["Participacao"]:.2f}%'])
-                else:
-                    dados3.append(['Produto', 'Qtd', 'Faturamento', '% Part'])
-                    for _, p in prods.iterrows():
-                        dados3.append([p['Produto'], int(p['Quantidade']), f'R$ {p["Total"]:.2f}', f'{p["Participacao"]:.2f}%'])
-                dados3.append([])
-            sheet3.clear()
-            sheet3.update('A1', dados3)
+                dados_div = [['DIVERGÊNCIAS DE PREÇO (>5%)'], [], ['Produto','Preço Config','Preço Real','Diferença %']]
+                for _,d in diverg.iterrows():
+                    dados_div.append([d['Produto'], f"R$ {d['Preco_Cadastrado']:.2f}", f"R$ {d['Preco_Real']:.2f}", f"{d['Divergencia_%']:.1f}%"])
+                sh_div.clear()
+                sh_div.update('A1', dados_div)
             
-            # 4. Pareto
-            produtos_sorted = produtos.sort_values('Total', ascending=False)
-            produtos_sorted['Acumulado'] = produtos_sorted['Total'].cumsum() / produtos_sorted['Total'].sum()
-            pareto_80 = produtos_sorted[produtos_sorted['Acumulado'] <= 0.8]
+            # Dashboard
+            try: sh1 = ss.worksheet("1. Dashboard")
+            except: sh1 = ss.add_worksheet("1. Dashboard", 100, 5)
             
-            try: sheet4 = spreadsheet.worksheet("4. Pareto")
-            except: sheet4 = spreadsheet.add_worksheet("4. Pareto", 500, 7)
+            lucro = prods['Lucro_Liquido'].sum() if 'Lucro_Liquido' in prods.columns else 0
+            margem = prods['Margem_Bruta'].sum() if 'Margem_Bruta' in prods.columns else 0
             
-            dados4 = [
-                ['PARETO 80/20'],
-                [],
-                [f'{len(pareto_80)} produtos = 80% vendas'],
-                [f'Faturamento: R$ {pareto_80["Total"].sum():,.2f}'],
-                []
-            ]
+            d1 = [['DASHBOARD'],
+                  [datetime.now().strftime("%d/%m/%Y %H:%M")],[],
+                  ['Dias',dias],
+                  ['Faturamento',f'R$ {total:,.2f}'],
+                  ['Margem',f'R$ {margem:,.2f}'],
+                  ['Lucro',f'R$ {lucro:,.2f}'],
+                  ['Produtos',len(prods)],[],
+                  ['BCG','Qtd','Faturamento','Lucro']]
             
-            if 'Lucro_Liquido' in pareto_80.columns:
-                dados4.append(['Rank', 'Produto', 'Qtd', 'Faturamento', 'Lucro', '% Acum', 'BCG'])
-                for i, (_, p) in enumerate(pareto_80.iterrows(), 1):
-                    dados4.append([i, p['Produto'], int(p['Quantidade']), f'R$ {p["Total"]:.2f}', f'R$ {p["Lucro_Liquido"]:.2f}', f'{p["Acumulado"]*100:.1f}%', p['Categoria']])
-            else:
-                dados4.append(['Rank', 'Produto', 'Qtd', 'Faturamento', '% Acum', 'BCG'])
-                for i, (_, p) in enumerate(pareto_80.iterrows(), 1):
-                    dados4.append([i, p['Produto'], int(p['Quantidade']), f'R$ {p["Total"]:.2f}', f'{p["Acumulado"]*100:.1f}%', p['Categoria']])
+            for cat in ['Estrela','Vaca Leiteira','Interrogação','Abacaxi']:
+                pc = prods[prods['BCG']==cat]
+                lc = pc['Lucro_Liquido'].sum() if 'Lucro_Liquido' in pc.columns else 0
+                d1.append([cat, len(pc), f'R$ {pc["Total"].sum():,.2f}', f'R$ {lc:,.2f}'])
             
-            sheet4.clear()
-            sheet4.update('A1', dados4)
+            sh1.clear()
+            sh1.update('A1', d1)
             
-            # 5. CEO
-            try: sheet5 = spreadsheet.worksheet("5. CEO")
-            except: sheet5 = spreadsheet.add_worksheet("5. CEO", 100, 3)
+            # Detalhes
+            cols = ['Data','Produto','Qtd','Preço','Total','Canal','BCG','Upload']
+            if 'Custo_Total' in df_full.columns: cols.insert(5,'Custo')
+            if 'Lucro_Liquido' in df_full.columns: cols.insert(-2,'Lucro')
+            if 'Divergencia_%' in df_full.columns: cols.insert(-2,'Diverg%')
             
-            estrelas = len(produtos[produtos['Categoria']=='Estrela'])
-            vacas = len(produtos[produtos['Categoria']=='Vaca Leiteira'])
-            interrogacoes = len(produtos[produtos['Categoria']=='Interrogação'])
-            abacaxis = len(produtos[produtos['Categoria']=='Abacaxi'])
+            d6 = [cols]
+            for _,r in df_full.iterrows():
+                cat = prods[prods['Produto']==r['Produto']]['BCG'].values[0] if r['Produto'] in prods['Produto'].values else 'N/A'
+                linha = [str(r.get('Data','')), r['Produto'], int(r['Quantidade']), float(r['Preço Unitário']), float(r['Total'])]
+                if 'Custo_Total' in r: linha.append(float(r['Custo_Total']))
+                if 'Lucro_Liquido' in r: linha.append(float(r['Lucro_Liquido']))
+                if 'Divergencia_%' in r: linha.append(f"{r['Divergencia_%']:.1f}%")
+                linha.extend([r.get('Canal',''), cat, r.get('Data_Upload','')])
+                d6.append(linha)
             
-            dados5 = [
-                ['RECOMENDAÇÕES CEO'],
-                [f'{dias_analisados} dias | Lucro: R$ {lucro_total:,.2f}'],
-                [],
-                ['PRIORIDADE', 'AÇÃO', 'IMPACTO'],
-                ['🔴 CRÍTICA', f'Investir {estrelas} Estrelas', 'Alto lucro + Alto volume'],
-                ['🟡 ALTA', f'Manter {vacas} Vacas', 'Fluxo de caixa estável'],
-                ['🟠 MÉDIA', f'Testar {interrogacoes} Interrogações', 'Potencial não explorado'],
-                ['🔴 CRÍTICA', f'Liquidar {abacaxis} Abacaxis', 'Liberar capital parado'],
-                [],
-                ['FOCO PARETO'],
-                [f'{len(pareto_80)} produtos = R$ {pareto_80["Total"].sum():,.2f}'],
-            ]
-            sheet5.clear()
-            sheet5.update('A1', dados5)
+            sh.clear()
+            sh.update('A1', d6)
             
-            # 6. Detalhes
-            colunas_detalhes = ['Data', 'Produto', 'Qtd', 'Preço', 'Total', 'Canal', 'BCG', 'Upload']
-            if 'Custo_Total' in df_completo.columns:
-                colunas_detalhes.insert(5, 'Custo')
-                colunas_detalhes.insert(6, 'Margem')
-            if 'Lucro_Liquido' in df_completo.columns:
-                colunas_detalhes.insert(-2, 'Lucro')
-            
-            dados6 = [colunas_detalhes]
-            for _, row in df_completo.iterrows():
-                cat = produtos[produtos['Produto'] == row['Produto']]['Categoria'].values[0] if row['Produto'] in produtos['Produto'].values else 'N/A'
-                linha = [
-                    str(row.get('Data', '')),
-                    row['Produto'],
-                    int(row['Quantidade']) if pd.notna(row['Quantidade']) else 0,
-                    float(row['Preço Unitário']) if pd.notna(row.get('Preço Unitário', 0)) else 0,
-                    float(row['Total']) if pd.notna(row['Total']) else 0
-                ]
-                
-                if 'Custo_Total' in row:
-                    linha.append(float(row['Custo_Total']) if pd.notna(row['Custo_Total']) else 0)
-                    linha.append(float(row['Margem_Bruta']) if pd.notna(row['Margem_Bruta']) else 0)
-                
-                if 'Lucro_Liquido' in row:
-                    linha.append(float(row['Lucro_Liquido']) if pd.notna(row['Lucro_Liquido']) else 0)
-                
-                linha.extend([row.get('Canal', ''), cat, row.get('Data_Upload', '')])
-                dados6.append(linha)
-            
-            sheet_detalhes.clear()
-            sheet_detalhes.update('A1', dados6)
-            
-            st.success(f"✅ {len(df_completo)} registros ({len(df_novo)} novos)")
-            st.info(f"📊 {dias_analisados} dias | Lucro: R$ {lucro_total:,.2f}")
+            st.success(f"✅ {len(df_full)} registros")
+            if 'Divergencia_%' in df_full.columns:
+                divs = len(df_full[abs(df_full['Divergencia_%'])>5])
+                if divs > 0:
+                    st.warning(f"⚠️ {divs} produtos com preço divergente - veja aba 'Divergencias'")
             st.info(f"🔗 [Abrir]({st.secrets['GOOGLE_SHEETS_URL']})")
-            
         except Exception as e:
-            st.error(f"❌ {str(e)}")
+            st.error(f"❌ {e}")
 else:
     st.info("👈 Configure e faça upload")
-    st.markdown("""
-    ### Como usar:
-    
-    1. **Upload JSON** (opcional): Configurações de produtos e canais
-    2. **Upload Excel**: Planilha de vendas (Bling ou padrão)
-    3. **Enviar**: Análise completa com margem e lucro
-    
-    **Com JSON**: Análise de lucro líquido por produto/canal
-    **Sem JSON**: Análise de faturamento bruto (BCG, Pareto)
-    """)
