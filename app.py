@@ -4,22 +4,77 @@ from datetime import datetime
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
+import re
 
 st.set_page_config(page_title="Sales BI Analytics", page_icon="📊", layout="wide")
 st.title("📊 Sales BI Analytics - Análise Evolutiva")
 
 CHANNELS = {'geral': '📊 Vendas Gerais', 'mercado_livre': '🛒 Mercado Livre', 'shopee_matriz': '🛍️ Shopee Matriz', 'shopee_150': '🏪 Shopee 1:50', 'shein': '👗 Shein'}
 
+def converter_planilha_bling(df_bling, data_venda):
+    """Converte planilha do Bling para formato do app"""
+    df_convertido = pd.DataFrame()
+    
+    # Mapear colunas
+    df_convertido['Data'] = data_venda
+    df_convertido['Produto'] = df_bling['Código']
+    df_convertido['Quantidade'] = df_bling['Quantidade']
+    
+    # Limpar valores monetários (R$ 877,80 → 877.80)
+    df_convertido['Total'] = df_bling['Valor'].apply(lambda x: 
+        float(str(x).replace('R$', '').replace('.', '').replace(',', '.').strip())
+    )
+    
+    # Calcular preço unitário
+    df_convertido['Preço Unitário'] = df_convertido['Total'] / df_convertido['Quantidade']
+    
+    return df_convertido
+
 with st.sidebar:
     st.header("Upload de Vendas")
+    
+    # Seletor de formato
+    formato = st.radio("Formato da Planilha", 
+                       ['Bling (Código, Quantidade, Valor)', 
+                        'Padrão (Data, Produto, Quantidade, Total)'])
+    
     canal = st.selectbox("Canal", list(CHANNELS.keys()), format_func=lambda x: CHANNELS[x])
+    
+    # Data da venda (para planilhas Bling)
+    if formato.startswith('Bling'):
+        data_venda = st.date_input("Data da Venda", datetime.now())
+    
     uploaded_file = st.file_uploader("Planilha Excel", type=['xlsx', 'xls'])
+    
     if uploaded_file and st.button("🔄 Processar"):
-        df_novo = pd.read_excel(uploaded_file)
-        df_novo['Canal'] = CHANNELS[canal]
-        df_novo['Data_Upload'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        st.session_state['data_novo'] = df_novo
-        st.success(f"✅ {len(df_novo)} registros")
+        try:
+            df_original = pd.read_excel(uploaded_file)
+            
+            # Detectar formato automaticamente
+            colunas = df_original.columns.tolist()
+            
+            if 'Código' in colunas and 'Valor' in colunas:
+                # Formato Bling
+                st.info("✅ Formato Bling detectado - Convertendo...")
+                df_novo = converter_planilha_bling(df_original, data_venda.strftime('%Y-%m-%d'))
+                st.success(f"✅ Convertido: {len(df_novo)} produtos")
+            else:
+                # Formato padrão
+                df_novo = df_original.copy()
+            
+            df_novo['Canal'] = CHANNELS[canal]
+            df_novo['Data_Upload'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            st.session_state['data_novo'] = df_novo
+            
+            # Mostrar preview
+            st.subheader("Preview dos Dados")
+            st.dataframe(df_novo.head(10))
+            st.metric("Total de Produtos", len(df_novo))
+            st.metric("Faturamento Total", f"R$ {df_novo['Total'].sum():,.2f}")
+            
+        except Exception as e:
+            st.error(f"❌ Erro ao processar: {str(e)}")
 
 if 'data_novo' in st.session_state:
     df_novo = st.session_state['data_novo']
@@ -197,3 +252,13 @@ if 'data_novo' in st.session_state:
             st.error(f"❌ {str(e)}")
 else:
     st.info("👈 Upload planilha")
+    st.markdown("""
+    ### Formatos Aceitos:
+    
+    **1. Bling (automático)**
+    - Colunas: Código, Quantidade, Valor
+    - Sistema converte automaticamente
+    
+    **2. Padrão**
+    - Colunas: Data, Produto, Quantidade, Total
+    """)
