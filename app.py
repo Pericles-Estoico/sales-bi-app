@@ -139,6 +139,7 @@ with st.sidebar:
             df_novo['Custo_Produto'] = 0.0
             df_novo['Peso_g'] = 0
             df_novo['Preco_Cadastrado'] = 0.0
+            df_novo['CNPJ'] = ''
             
             if 'kits' in st.session_state and 'skus' in st.session_state:
                 for idx, row in df_novo.iterrows():
@@ -152,6 +153,7 @@ with st.sidebar:
                         df_novo.at[idx, 'Custo_Produto'] = custo
                         df_novo.at[idx, 'Peso_g'] = peso
                         df_novo.at[idx, 'Preco_Cadastrado'] = kit_match.iloc[0]['Preço Venda (R$)']
+                        df_novo.at[idx, 'CNPJ'] = kit_match.iloc[0].get('CNPJ', '')
                         continue
                     
                     # Simples?
@@ -162,6 +164,7 @@ with st.sidebar:
                             df_novo.at[idx, 'Custo_Produto'] = simples_match.iloc[0]['Custo Total (R$)']
                             df_novo.at[idx, 'Peso_g'] = simples_match.iloc[0]['Peso (g)']
                             df_novo.at[idx, 'Preco_Cadastrado'] = simples_match.iloc[0]['Preço Venda (R$)']
+                            df_novo.at[idx, 'CNPJ'] = simples_match.iloc[0].get('CNPJ', '')
             
             # Custos fixos por pedido (1x, não por produto)
             custo_embalagem = st.session_state.get('custos_ped', pd.DataFrame())
@@ -189,11 +192,16 @@ with st.sidebar:
                     df_novo['Taxa_Gateway'] = df_novo['Total'] * (info['Taxa Gateway (%)'] / 100)
                     df_novo['Taxa_Fixa'] = info['Taxa Fixa Pedido (R$)'] / len(df_novo)
             
-            # Impostos
+            # Impostos por CNPJ
+            df_novo['Impostos'] = 0.0
             if 'impostos' in st.session_state:
-                simples = st.session_state['impostos'][st.session_state['impostos']['Tipo'] == 'Simples Nacional']
-                if len(simples) > 0:
-                    df_novo['Impostos'] = df_novo['Total'] * (simples.iloc[0]['Alíquota (%)'] / 100)
+                impostos_df = st.session_state['impostos']
+                for idx, row in df_novo.iterrows():
+                    cnpj = row.get('CNPJ', '')
+                    if cnpj:
+                        regime_match = impostos_df[impostos_df['Regime'].str.contains(cnpj, case=False, na=False)]
+                        if len(regime_match) > 0:
+                            df_novo.at[idx, 'Impostos'] = row['Total'] * (regime_match.iloc[0]['Alíquota (%)'] / 100)
             
             df_novo['Lucro_Liquido'] = df_novo['Margem_Bruta'] - df_novo.get('Taxa_Marketplace', 0) - df_novo.get('Taxa_Gateway', 0) - df_novo.get('Taxa_Fixa', 0) - df_novo.get('Frete', 0) - df_novo.get('Impostos', 0)
             df_novo['Margem_%'] = (df_novo['Lucro_Liquido'] / df_novo['Total'] * 100).fillna(0)
