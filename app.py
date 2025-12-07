@@ -18,7 +18,7 @@ def converter_bling(df, data):
     d['Preço Unitário'] = d['Total'] / d['Quantidade']
     return d
 
-def calcular_custo_kit(codigo, kits_df, skus_df):
+def calcular_custo_kit(codigo, kits_df, produtos_df):
     kit = kits_df[kits_df['Código Kit'] == codigo]
     if len(kit) == 0: return 0, 0, []
     componentes = kit.iloc[0]['SKUs Componentes'].split(';')
@@ -27,13 +27,13 @@ def calcular_custo_kit(codigo, kits_df, skus_df):
     peso = 0
     detalhes = []
     for comp, qtd in zip(componentes, qtds):
-        sku = skus_df[skus_df['Código'] == comp]
-        if len(sku) > 0:
-            c = sku.iloc[0]['Custo Total Unitário (R$)']
-            p = sku.iloc[0]['Peso (g)']
+        prod = produtos_df[produtos_df['Código'] == comp]
+        if len(prod) > 0:
+            c = prod.iloc[0]['Custo (R$)']
+            p = prod.iloc[0]['Peso (g)']
             custo += c * qtd
             peso += p * qtd
-            detalhes.append(f"{sku.iloc[0]['Nome']} x{qtd}")
+            detalhes.append(f"{comp} x{qtd}")
     return custo, peso, detalhes
 
 def calcular_frete(peso_g, frete_df):
@@ -50,9 +50,9 @@ try:
     
     # Carregar configs
     configs = {}
-    for nome, key in [("0. SKUs Base", "skus"), ("0. Kits", "kits"), ("0. Produtos Simples", "simples"), 
+    for nome, key in [("0. Produtos", "produtos"), ("0. Kits", "kits"), 
                       ("0. Canais", "canais"), ("0. Custos Pedido", "custos_ped"), ("0. Impostos", "impostos"),
-                      ("0. Frete", "frete"), ("0. Metas", "metas")]:
+                      ("0. Frete", "frete")]:
         try:
             sh = ss.worksheet(nome)
             data = sh.get_all_values()
@@ -72,10 +72,9 @@ st.title("📊 Sales BI Pro - Dashboard Executivo")
 if configs:
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("SKUs Base", len(configs.get('skus', [])))
+        st.metric("Produtos", len(configs.get('produtos', [])))
         st.metric("Kits", len(configs.get('kits', [])))
     with col2:
-        st.metric("Produtos Simples", len(configs.get('simples', [])))
         st.metric("Canais", len(configs.get('canais', [])))
     with col3:
         if 'metas' in configs:
@@ -94,14 +93,12 @@ with st.sidebar:
     if config_file and st.button("💾 Salvar"):
         try:
             sheets_map = {
-                '1. SKUs Base': '0. SKUs Base',
+                '1. Produtos': '0. Produtos',
                 '2. Kits': '0. Kits',
-                '3. Produtos Simples': '0. Produtos Simples',
-                '4. Custos por Pedido': '0. Custos Pedido',
-                '5. Canais': '0. Canais',
-                '6. Impostos': '0. Impostos',
-                '9. Frete': '0. Frete',
-                '7. Metas': '0. Metas'
+                '3. Custos por Pedido': '0. Custos Pedido',
+                '4. Canais': '0. Canais',
+                '5. Impostos': '0. Impostos',
+                '6. Frete': '0. Frete'
             }
             
             for sheet_orig, sheet_dest in sheets_map.items():
@@ -142,7 +139,7 @@ with st.sidebar:
             df_novo['Peso_g'] = 0
             df_novo['Preco_Cadastrado'] = 0.0
             
-            if 'kits' in st.session_state and 'skus' in st.session_state:
+            if 'kits' in st.session_state and 'produtos' in st.session_state:
                 for idx, row in df_novo.iterrows():
                     prod = row['Produto']
                     
@@ -150,20 +147,19 @@ with st.sidebar:
                     kit_match = st.session_state['kits'][st.session_state['kits']['Código Kit'] == prod]
                     if len(kit_match) > 0:
                         df_novo.at[idx, 'Tipo'] = 'Kit'
-                        custo, peso, _ = calcular_custo_kit(prod, st.session_state['kits'], st.session_state['skus'])
+                        custo, peso, _ = calcular_custo_kit(prod, st.session_state['kits'], st.session_state['produtos'])
                         df_novo.at[idx, 'Custo_Produto'] = custo
                         df_novo.at[idx, 'Peso_g'] = peso
                         df_novo.at[idx, 'Preco_Cadastrado'] = kit_match.iloc[0]['Preço Venda (R$)']
                         continue
                     
-                    # Simples?
-                    if 'simples' in st.session_state:
-                        simples_match = st.session_state['simples'][st.session_state['simples']['Código'] == prod]
-                        if len(simples_match) > 0:
-                            df_novo.at[idx, 'Tipo'] = 'Simples'
-                            df_novo.at[idx, 'Custo_Produto'] = simples_match.iloc[0]['Custo Total (R$)']
-                            df_novo.at[idx, 'Peso_g'] = simples_match.iloc[0]['Peso (g)']
-                            df_novo.at[idx, 'Preco_Cadastrado'] = simples_match.iloc[0]['Preço Venda (R$)']
+                    # Produto simples?
+                    prod_match = st.session_state['produtos'][st.session_state['produtos']['Código'] == prod]
+                    if len(prod_match) > 0:
+                        df_novo.at[idx, 'Tipo'] = 'Produto'
+                        df_novo.at[idx, 'Custo_Produto'] = prod_match.iloc[0]['Custo (R$)']
+                        df_novo.at[idx, 'Peso_g'] = prod_match.iloc[0]['Peso (g)']
+                        df_novo.at[idx, 'Preco_Cadastrado'] = prod_match.iloc[0]['Preço Venda (R$)']
             
             # Custos fixos por pedido (1x, não por produto)
             custo_embalagem = st.session_state.get('custos_ped', pd.DataFrame())
@@ -326,6 +322,76 @@ if 'data_novo' in st.session_state:
                 
                 sh_cnpj.clear()
                 sh_cnpj.update('A1', d_cnpj)
+            
+            # Análise Executiva
+            try: sh_exec = ss.worksheet("3. Análise Executiva")
+            except: sh_exec = ss.add_worksheet("3. Análise Executiva", 200, 6)
+            
+            margem_media = (lucro / total * 100) if total > 0 else 0
+            ticket_medio = total / len(df_full) if len(df_full) > 0 else 0
+            produtos_lucrativos = len(prods[prods['Lucro_Liquido'] > 0])
+            produtos_prejuizo = len(prods[prods['Lucro_Liquido'] <= 0])
+            
+            def semaforo(valor, meta_min, meta_ideal):
+                if valor >= meta_ideal: return '🟢'
+                elif valor >= meta_min: return '🟡'
+                else: return '🔴'
+            
+            margem_semaforo = semaforo(margem_media, 10, 15)
+            lucro_semaforo = '🟢' if lucro > 0 else '🔴'
+            
+            top5 = prods.nlargest(5, 'Lucro_Liquido')[['Produto','Lucro_Liquido','BCG']]
+            bottom5 = prods.nsmallest(5, 'Lucro_Liquido')[['Produto','Lucro_Liquido','BCG']]
+            
+            recomendacoes = []
+            if produtos_prejuizo > 0:
+                recomendacoes.append(f"⚠️ {produtos_prejuizo} produtos em prejuízo - revisar preço ou descontinuar")
+            if margem_media < 15:
+                recomendacoes.append(f"📈 Margem {margem_media:.1f}% abaixo da meta (15%) - aumentar preços ou reduzir custos")
+            
+            abacaxis = prods[prods['BCG'] == 'Abacaxi']
+            if len(abacaxis) > 0:
+                recomendacoes.append(f"🗑️ {len(abacaxis)} produtos 'Abacaxi' - considerar promoção ou descontinuar")
+            
+            estrelas = prods[prods['BCG'] == 'Estrela']
+            if len(estrelas) > 0:
+                recomendacoes.append(f"⭐ {len(estrelas)} produtos 'Estrela' - aumentar estoque e investir em marketing")
+            
+            d_exec = [
+                ['ANÁLISE EXECUTIVA - TOMADA DE DECISÃO'],
+                [datetime.now().strftime("%d/%m/%Y %H:%M")],
+                [],
+                ['INDICADORES PRINCIPAIS', 'Valor', 'Meta', 'Status'],
+                ['Margem Líquida (%)', f'{margem_media:.1f}%', '15%', margem_semaforo],
+                ['Lucro Líquido (R$)', f'R$ {lucro:,.2f}', '> 0', lucro_semaforo],
+                ['Ticket Médio (R$)', f'R$ {ticket_medio:.2f}', 'R$ 150', semaforo(ticket_medio, 100, 150)],
+                ['Produtos Lucrativos', produtos_lucrativos, f'{len(prods)}', '🟢' if produtos_lucrativos == len(prods) else '🟡'],
+                [],
+                ['TOP 5 MAIS LUCRATIVOS'],
+                ['Produto', 'Lucro', 'BCG']
+            ]
+            
+            for _, p in top5.iterrows():
+                d_exec.append([p['Produto'], f"R$ {p['Lucro_Liquido']:,.2f}", p['BCG']])
+            
+            d_exec.append([])
+            d_exec.append(['TOP 5 MENOS LUCRATIVOS'])
+            d_exec.append(['Produto', 'Lucro', 'BCG'])
+            
+            for _, p in bottom5.iterrows():
+                d_exec.append([p['Produto'], f"R$ {p['Lucro_Liquido']:,.2f}", p['BCG']])
+            
+            d_exec.append([])
+            d_exec.append(['RECOMENDAÇÕES ESTRATÉGICAS'])
+            
+            for rec in recomendacoes:
+                d_exec.append([rec])
+            
+            if not recomendacoes:
+                d_exec.append(['✅ Operação saudável - manter estratégia atual'])
+            
+            sh_exec.clear()
+            sh_exec.update('A1', d_exec)
             
             # Detalhes
             cols = ['Data','Produto','Tipo','Qtd','Total','Custo','Lucro','Margem%','Canal','CNPJ','BCG']
