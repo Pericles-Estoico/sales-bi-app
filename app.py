@@ -123,6 +123,7 @@ with st.sidebar:
     st.header("📤 Vendas")
     formato = st.radio("Formato", ['Bling', 'Padrão'])
     canal = st.selectbox("Canal", list(CHANNELS.keys()), format_func=lambda x: CHANNELS[x])
+    cnpj_regime = st.selectbox("CNPJ/Regime", ['Simples Nacional', 'Lucro Presumido', 'Lucro Real'])
     if formato == 'Bling':
         data_venda = st.date_input("Data", datetime.now())
     uploaded_file = st.file_uploader("Excel", type=['xlsx'])
@@ -132,6 +133,7 @@ with st.sidebar:
             df_orig = pd.read_excel(uploaded_file)
             df_novo = converter_bling(df_orig, data_venda.strftime('%Y-%m-%d')) if 'Código' in df_orig.columns else df_orig.copy()
             df_novo['Canal'] = CHANNELS[canal]
+            df_novo['CNPJ'] = cnpj_regime
             df_novo['Data_Upload'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             
             # Processar
@@ -139,7 +141,6 @@ with st.sidebar:
             df_novo['Custo_Produto'] = 0.0
             df_novo['Peso_g'] = 0
             df_novo['Preco_Cadastrado'] = 0.0
-            df_novo['CNPJ'] = ''
             
             if 'kits' in st.session_state and 'skus' in st.session_state:
                 for idx, row in df_novo.iterrows():
@@ -153,7 +154,6 @@ with st.sidebar:
                         df_novo.at[idx, 'Custo_Produto'] = custo
                         df_novo.at[idx, 'Peso_g'] = peso
                         df_novo.at[idx, 'Preco_Cadastrado'] = kit_match.iloc[0]['Preço Venda (R$)']
-                        df_novo.at[idx, 'CNPJ'] = kit_match.iloc[0].get('CNPJ', '')
                         continue
                     
                     # Simples?
@@ -164,7 +164,6 @@ with st.sidebar:
                             df_novo.at[idx, 'Custo_Produto'] = simples_match.iloc[0]['Custo Total (R$)']
                             df_novo.at[idx, 'Peso_g'] = simples_match.iloc[0]['Peso (g)']
                             df_novo.at[idx, 'Preco_Cadastrado'] = simples_match.iloc[0]['Preço Venda (R$)']
-                            df_novo.at[idx, 'CNPJ'] = simples_match.iloc[0].get('CNPJ', '')
             
             # Custos fixos por pedido (1x, não por produto)
             custo_embalagem = st.session_state.get('custos_ped', pd.DataFrame())
@@ -192,16 +191,14 @@ with st.sidebar:
                     df_novo['Taxa_Gateway'] = df_novo['Total'] * (info['Taxa Gateway (%)'] / 100)
                     df_novo['Taxa_Fixa'] = info['Taxa Fixa Pedido (R$)'] / len(df_novo)
             
-            # Impostos por CNPJ
+            # Impostos por regime escolhido
             df_novo['Impostos'] = 0.0
             if 'impostos' in st.session_state:
                 impostos_df = st.session_state['impostos']
-                for idx, row in df_novo.iterrows():
-                    cnpj = row.get('CNPJ', '')
-                    if cnpj:
-                        regime_match = impostos_df[impostos_df['Regime'].str.contains(cnpj, case=False, na=False)]
-                        if len(regime_match) > 0:
-                            df_novo.at[idx, 'Impostos'] = row['Total'] * (regime_match.iloc[0]['Alíquota (%)'] / 100)
+                regime_match = impostos_df[impostos_df['Regime'] == cnpj_regime]
+                if len(regime_match) > 0:
+                    aliquota = regime_match.iloc[0]['Alíquota (%)'] / 100
+                    df_novo['Impostos'] = df_novo['Total'] * aliquota
             
             df_novo['Lucro_Liquido'] = df_novo['Margem_Bruta'] - df_novo.get('Taxa_Marketplace', 0) - df_novo.get('Taxa_Gateway', 0) - df_novo.get('Taxa_Fixa', 0) - df_novo.get('Frete', 0) - df_novo.get('Impostos', 0)
             df_novo['Margem_%'] = (df_novo['Lucro_Liquido'] / df_novo['Total'] * 100).fillna(0)
@@ -226,8 +223,136 @@ with st.sidebar:
 
 if 'data_novo' in st.session_state:
     if st.button("📤 Enviar para Google Sheets"):
-        st.info("✅ Enviando... (mesmo código anterior - mantido funcionamento)")
-        # Código de envio idêntico ao app anterior (omitido por brevidade)
+        try:
+            df_novo = st.session_state['data_novo']
+            
+            # Ler dados existentes
+            try:
+                sh = ss.worksheet("6. Detalhes")
+                ex = sh.get_all_values()
+                df_ex = pd.DataFrame(ex[1:], columns=ex[0]) if len(ex)>1 else pd.DataFrame()
+                for c in ['Quantidade','Total','Custo_Total','Margem_Bruta','Lucro_Liquido','Impostos']:
+                    if c in df_ex.columns: df_ex[c] = pd.to_numeric(df_ex[c], errors='coerce')
+            except:
+                df_ex = pd.DataFrame()
+            
+            try: sh = ss.worksheet("6. Detalhes")
+            except: sh = ss.add_worksheet("6. Detalhes", 5000, 20)
+            
+            df_full = pd.concat([df_ex, df_novo], ignore_index=True) if not df_ex.empty else df_novo
+            
+            # Análise geral
+            agg = {'Quantidade':'sum','Total':'sum','Custo_Total':'sum','Margem_Bruta':'sum','Lucro_Liquido':'sum'}
+            if 'Impostos' in df_full.columns: agg['Impostos'] = 'sum'
+            
+            prods = df_full.groupby('Produto').agg(agg).reset_index()
+            total = prods['Total'].sum()
+            prods['Part%'] = (prods['Total']/total)*100
+            
+            med_q = prods['Quantidade'].median()
+            med_p = prods['Part%'].median()
+            
+            def bcg(r):
+                if r['Quantidade']>=med_q and r['Part%']>=med_p: return 'Estrela'
+                elif r['Quantidade']<med_q and r['Part%']>=med_p: return 'Vaca Leiteira'
+                elif r['Quantidade']>=med_q and r['Part%']<med_p: return 'Interrogação'
+                else: return 'Abacaxi'
+            
+            prods['BCG'] = prods.apply(bcg, axis=1)
+            
+            # Dashboard Geral
+            try: sh1 = ss.worksheet("1. Dashboard Geral")
+            except: sh1 = ss.add_worksheet("1. Dashboard Geral", 100, 5)
+            
+            dias = len(df_full['Data'].unique()) if 'Data' in df_full.columns else 1
+            lucro = prods['Lucro_Liquido'].sum()
+            margem = prods['Margem_Bruta'].sum()
+            impostos_total = prods['Impostos'].sum() if 'Impostos' in prods.columns else 0
+            
+            d1 = [['DASHBOARD GERAL'],
+                  [datetime.now().strftime("%d/%m/%Y %H:%M")],[],
+                  ['Dias',dias],
+                  ['Faturamento',f'R$ {total:,.2f}'],
+                  ['Margem Bruta',f'R$ {margem:,.2f}'],
+                  ['Impostos',f'R$ {impostos_total:,.2f}'],
+                  ['Lucro Líquido',f'R$ {lucro:,.2f}'],
+                  ['Margem %',f'{(lucro/total*100):.1f}%'],
+                  ['Produtos',len(prods)],[],
+                  ['BCG','Qtd','Faturamento','Lucro']]
+            
+            for cat in ['Estrela','Vaca Leiteira','Interrogação','Abacaxi']:
+                pc = prods[prods['BCG']==cat]
+                lc = pc['Lucro_Liquido'].sum()
+                d1.append([cat, len(pc), f'R$ {pc["Total"].sum():,.2f}', f'R$ {lc:,.2f}'])
+            
+            sh1.clear()
+            sh1.update('A1', d1)
+            
+            # Análise por CNPJ
+            if 'CNPJ' in df_full.columns:
+                try: sh_cnpj = ss.worksheet("2. Por CNPJ")
+                except: sh_cnpj = ss.add_worksheet("2. Por CNPJ", 100, 8)
+                
+                cnpj_agg = df_full.groupby('CNPJ').agg({
+                    'Total':'sum',
+                    'Custo_Total':'sum',
+                    'Margem_Bruta':'sum',
+                    'Impostos':'sum',
+                    'Lucro_Liquido':'sum'
+                }).reset_index()
+                
+                cnpj_agg['Margem %'] = (cnpj_agg['Lucro_Liquido'] / cnpj_agg['Total'] * 100).fillna(0)
+                cnpj_agg['Alíquota Efetiva %'] = (cnpj_agg['Impostos'] / cnpj_agg['Total'] * 100).fillna(0)
+                
+                d_cnpj = [['ANÁLISE POR CNPJ/REGIME'],[],
+                          ['Regime','Faturamento','Custo','Margem Bruta','Impostos','Lucro Líquido','Margem %','Alíquota %']]
+                
+                for _, row in cnpj_agg.iterrows():
+                    d_cnpj.append([
+                        row['CNPJ'],
+                        f"R$ {row['Total']:,.2f}",
+                        f"R$ {row['Custo_Total']:,.2f}",
+                        f"R$ {row['Margem_Bruta']:,.2f}",
+                        f"R$ {row['Impostos']:,.2f}",
+                        f"R$ {row['Lucro_Liquido']:,.2f}",
+                        f"{row['Margem %']:.1f}%",
+                        f"{row['Alíquota Efetiva %']:.1f}%"
+                    ])
+                
+                d_cnpj.append([])
+                melhor = cnpj_agg.loc[cnpj_agg['Lucro_Liquido'].idxmax()]
+                d_cnpj.append(['RECOMENDAÇÃO'])
+                d_cnpj.append([f"Regime mais lucrativo: {melhor['CNPJ']} (Margem {melhor['Margem %']:.1f}%)"])
+                
+                sh_cnpj.clear()
+                sh_cnpj.update('A1', d_cnpj)
+            
+            # Detalhes
+            cols = ['Data','Produto','Tipo','Qtd','Total','Custo','Lucro','Margem%','Canal','CNPJ','BCG']
+            d6 = [cols]
+            for _,r in df_full.iterrows():
+                cat = prods[prods['Produto']==r['Produto']]['BCG'].values[0] if r['Produto'] in prods['Produto'].values else 'N/A'
+                d6.append([
+                    str(r.get('Data','')),
+                    r['Produto'],
+                    r.get('Tipo',''),
+                    int(r['Quantidade']),
+                    float(r['Total']),
+                    float(r.get('Custo_Total',0)),
+                    float(r.get('Lucro_Liquido',0)),
+                    f"{r.get('Margem_%',0):.1f}%",
+                    r.get('Canal',''),
+                    r.get('CNPJ',''),
+                    cat
+                ])
+            
+            sh.clear()
+            sh.update('A1', d6)
+            
+            st.success(f"✅ {len(df_full)} registros | Lucro: R$ {lucro:,.2f}")
+            st.info(f"🔗 [Abrir Google Sheets]({st.secrets['GOOGLE_SHEETS_URL']})")
+        except Exception as e:
+            st.error(f"❌ {e}")
 
 else:
     if not configs:
