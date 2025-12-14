@@ -52,7 +52,7 @@ try:
     configs = {}
     for nome, key in [("0. Produtos", "produtos"), ("0. Kits", "kits"), 
                       ("0. Canais", "canais"), ("0. Custos Pedido", "custos_ped"), ("0. Impostos", "impostos"),
-                      ("0. Frete", "frete")]:
+                      ("0. Frete", "frete"), ("0. Metas", "metas")]:
         try:
             sh = ss.worksheet(nome)
             data = sh.get_all_values()
@@ -98,7 +98,8 @@ with st.sidebar:
                 '3. Custos por Pedido': '0. Custos Pedido',
                 '4. Canais': '0. Canais',
                 '5. Impostos': '0. Impostos',
-                '6. Frete': '0. Frete'
+                '6. Frete': '0. Frete',
+                '7. Metas': '0. Metas'
             }
             
             for sheet_orig, sheet_dest in sheets_map.items():
@@ -322,6 +323,94 @@ if 'data_novo' in st.session_state:
                 
                 sh_cnpj.clear()
                 sh_cnpj.update('A1', d_cnpj)
+            
+            # Análise Executiva
+            try: sh_exec = ss.worksheet("3. Análise Executiva")
+            except: sh_exec = ss.add_worksheet("3. Análise Executiva", 200, 6)
+            
+            margem_media = (lucro / total * 100) if total > 0 else 0
+            ticket_medio = total / len(df_full) if len(df_full) > 0 else 0
+            produtos_lucrativos = len(prods[prods['Lucro_Liquido'] > 0])
+            produtos_prejuizo = len(prods[prods['Lucro_Liquido'] <= 0])
+            
+            # Ler metas
+            margem_min = 10.0
+            margem_ideal = 15.0
+            ticket_min = 100.0
+            ticket_ideal = 150.0
+            
+            if 'metas' in st.session_state:
+                metas_df = st.session_state['metas']
+                for _, m in metas_df.iterrows():
+                    if 'Mínima' in m['Indicador'] and 'Margem' in m['Indicador']:
+                        margem_min = m['Valor']
+                    elif 'Ideal' in m['Indicador'] and 'Margem' in m['Indicador']:
+                        margem_ideal = m['Valor']
+                    elif 'Mínimo' in m['Indicador'] and 'Ticket' in m['Indicador']:
+                        ticket_min = m['Valor']
+                    elif 'Ideal' in m['Indicador'] and 'Ticket' in m['Indicador']:
+                        ticket_ideal = m['Valor']
+            
+            def semaforo(valor, meta_min, meta_ideal):
+                if valor >= meta_ideal: return '🟢'
+                elif valor >= meta_min: return '🟡'
+                else: return '🔴'
+            
+            margem_semaforo = semaforo(margem_media, margem_min, margem_ideal)
+            lucro_semaforo = '🟢' if lucro > 0 else '🔴'
+            
+            top5 = prods.nlargest(5, 'Lucro_Liquido')[['Produto','Lucro_Liquido','BCG']]
+            bottom5 = prods.nsmallest(5, 'Lucro_Liquido')[['Produto','Lucro_Liquido','BCG']]
+            
+            recomendacoes = []
+            if produtos_prejuizo > 0:
+                recomendacoes.append(f"⚠️ {produtos_prejuizo} produtos em prejuízo - revisar preço ou descontinuar")
+            if margem_media < margem_ideal:
+                recomendacoes.append(f"📈 Margem {margem_media:.1f}% abaixo da meta ({margem_ideal:.0f}%) - aumentar preços ou reduzir custos")
+            
+            abacaxis = prods[prods['BCG'] == 'Abacaxi']
+            if len(abacaxis) > 0:
+                recomendacoes.append(f"🗑️ {len(abacaxis)} produtos 'Abacaxi' - considerar promoção ou descontinuar")
+            
+            estrelas = prods[prods['BCG'] == 'Estrela']
+            if len(estrelas) > 0:
+                recomendacoes.append(f"⭐ {len(estrelas)} produtos 'Estrela' - aumentar estoque e investir em marketing")
+            
+            d_exec = [
+                ['ANÁLISE EXECUTIVA - TOMADA DE DECISÃO'],
+                [datetime.now().strftime("%d/%m/%Y %H:%M")],
+                [],
+                ['INDICADORES PRINCIPAIS', 'Valor', 'Meta', 'Status'],
+                ['Margem Líquida (%)', f'{margem_media:.1f}%', f'{margem_ideal:.0f}%', margem_semaforo],
+                ['Lucro Líquido (R$)', f'R$ {lucro:,.2f}', '> 0', lucro_semaforo],
+                ['Ticket Médio (R$)', f'R$ {ticket_medio:.2f}', f'R$ {ticket_ideal:.0f}', semaforo(ticket_medio, ticket_min, ticket_ideal)],
+                ['Produtos Lucrativos', produtos_lucrativos, f'{len(prods)}', '🟢' if produtos_lucrativos == len(prods) else '🟡'],
+                [],
+                ['TOP 5 MAIS LUCRATIVOS'],
+                ['Produto', 'Lucro', 'BCG']
+            ]
+            
+            for _, p in top5.iterrows():
+                d_exec.append([p['Produto'], f"R$ {p['Lucro_Liquido']:,.2f}", p['BCG']])
+            
+            d_exec.append([])
+            d_exec.append(['TOP 5 MENOS LUCRATIVOS'])
+            d_exec.append(['Produto', 'Lucro', 'BCG'])
+            
+            for _, p in bottom5.iterrows():
+                d_exec.append([p['Produto'], f"R$ {p['Lucro_Liquido']:,.2f}", p['BCG']])
+            
+            d_exec.append([])
+            d_exec.append(['RECOMENDAÇÕES ESTRATÉGICAS'])
+            
+            for rec in recomendacoes:
+                d_exec.append([rec])
+            
+            if not recomendacoes:
+                d_exec.append(['✅ Operação saudável - manter estratégia atual'])
+            
+            sh_exec.clear()
+            sh_exec.update('A1', d_exec)
             
             # Detalhes
             cols = ['Data','Produto','Tipo','Qtd','Total','Custo','Lucro','Margem%','Canal','CNPJ','BCG']
