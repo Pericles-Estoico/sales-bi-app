@@ -46,7 +46,21 @@ def calcular_frete(peso_g, frete_df):
 try:
     scope = ['https://spreadsheets.google.com/feeds','https://www.googleapis.com/auth/drive']
     creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(st.secrets["GOOGLE_SHEETS_CREDENTIALS"]), scope)
-    ss = gspread.authorize(creds).open_by_url(st.secrets["GOOGLE_SHEETS_URL"])
+    gc = gspread.authorize(creds)
+    ss = gc.open_by_url(st.secrets["GOOGLE_SHEETS_URL"])
+    
+    # Conectar template_estoque (se configurado)
+    estoque_produtos = set()
+    if "TEMPLATE_ESTOQUE_URL" in st.secrets:
+        try:
+            ss_estoque = gc.open_by_url(st.secrets["TEMPLATE_ESTOQUE_URL"])
+            ws_estoque = ss_estoque.worksheet('template_estoque')
+            df_estoque = pd.DataFrame(ws_estoque.get_all_records())
+            if 'codigo' in df_estoque.columns:
+                estoque_produtos = set(df_estoque['codigo'].tolist())
+            st.session_state['estoque_produtos'] = estoque_produtos
+        except:
+            pass
     
     # Carregar configs
     configs = {}
@@ -136,41 +150,85 @@ with st.sidebar:
             
             # Validar produtos
             produtos_venda = set(df_novo['Produto'].unique())
-            produtos_cadastrados = set()
-            kits_cadastrados = set()
+            produtos_config = set()
+            kits_config = set()
+            estoque_produtos = st.session_state.get('estoque_produtos', set())
             
             if 'produtos' in st.session_state:
-                produtos_cadastrados = set(st.session_state['produtos']['Código'].tolist())
+                produtos_config = set(st.session_state['produtos']['Código'].tolist())
             if 'kits' in st.session_state:
-                kits_cadastrados = set(st.session_state['kits']['Código Kit'].tolist())
+                kits_config = set(st.session_state['kits']['Código Kit'].tolist())
             
-            todos_cadastrados = produtos_cadastrados.union(kits_cadastrados)
-            produtos_faltantes = produtos_venda - todos_cadastrados
+            todos_config = produtos_config.union(kits_config)
             
-            if produtos_faltantes:
-                st.error(f"❌ {len(produtos_faltantes)} produto(s) não cadastrado(s)! Cadastre antes de enviar.")
-                
-                # Criar DataFrame para download
-                df_faltantes = pd.DataFrame({
-                    'Código': list(produtos_faltantes),
-                    'Custo (R$)': [0.0] * len(produtos_faltantes),
-                    'Preço Venda (R$)': [0.0] * len(produtos_faltantes),
-                    'Peso (g)': [0] * len(produtos_faltantes)
+            # Validação cruzada
+            import io
+            tem_erro = False
+            
+            # 1. Produtos não existem em template_estoque
+            if estoque_produtos:
+                nao_existe_estoque = produtos_venda - estoque_produtos - kits_config
+                if nao_existe_estoque:
+                    tem_erro = True
+                    st.error(f"❌ {len(nao_existe_estoque)} produto(s) NÃO EXISTEM no estoque! Cadastre no app estoque-completo-v3 primeiro.")
+                    df_nao_estoque = pd.DataFrame({'Código': list(nao_existe_estoque)})
+                    buffer1 = io.BytesIO()
+                    df_nao_estoque.to_excel(buffer1, index=False)
+                    st.download_button(
+                        label="📥 Baixar produtos para cadastrar no ESTOQUE",
+                        data=buffer1.getvalue(),
+                        file_name="produtos_cadastrar_estoque.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="btn_estoque"
+                    )
+            
+            # 2. Produtos existem em estoque mas não em Config_BI_Final
+            produtos_sem_custo = produtos_venda - todos_config
+            if estoque_produtos:
+                produtos_sem_custo = produtos_sem_custo.intersection(estoque_produtos)  # Só os que existem no estoque
+            
+            if produtos_sem_custo:
+                tem_erro = True
+                st.error(f"❌ {len(produtos_sem_custo)} produto(s) SEM CUSTO/PREÇO! Adicione em Config_BI_Final.")
+                df_sem_custo = pd.DataFrame({
+                    'Código': list(produtos_sem_custo),
+                    'Custo (R$)': [0.0] * len(produtos_sem_custo),
+                    'Preço Venda (R$)': [0.0] * len(produtos_sem_custo),
+                    'Peso (g)': [0] * len(produtos_sem_custo)
                 })
-                
-                # Botão download
-                import io
-                buffer = io.BytesIO()
-                df_faltantes.to_excel(buffer, index=False)
+                buffer2 = io.BytesIO()
+                df_sem_custo.to_excel(buffer2, index=False)
                 st.download_button(
-                    label="📥 Baixar lista de produtos faltantes",
-                    data=buffer.getvalue(),
-                    file_name="produtos_faltantes.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    label="📥 Baixar produtos para adicionar CUSTO/PREÇO",
+                    data=buffer2.getvalue(),
+                    file_name="produtos_adicionar_custo.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="btn_custo"
                 )
-                
-                st.warning("Preencha o arquivo e adicione na aba 'Produtos' do Google Sheets")
+            
+            if tem_erro:
                 st.stop()
+            
+            # Validação antiga (fallback se não tem template_estoque)
+            if not estoque_produtos:
+                produtos_faltantes = produtos_venda - todos_config
+                if produtos_faltantes:
+                    st.error(f"❌ {len(produtos_faltantes)} produto(s) não cadastrado(s)!")
+                    df_faltantes = pd.DataFrame({
+                        'Código': list(produtos_faltantes),
+                        'Custo (R$)': [0.0] * len(produtos_faltantes),
+                        'Preço Venda (R$)': [0.0] * len(produtos_faltantes),
+                        'Peso (g)': [0] * len(produtos_faltantes)
+                    })
+                    buffer = io.BytesIO()
+                    df_faltantes.to_excel(buffer, index=False)
+                    st.download_button(
+                        label="📥 Baixar lista de produtos faltantes",
+                        data=buffer.getvalue(),
+                        file_name="produtos_faltantes.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                    st.stop()
             
             # Processar
             df_novo['Tipo'] = 'Desconhecido'
