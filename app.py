@@ -134,6 +134,44 @@ with st.sidebar:
             df_novo['CNPJ'] = cnpj_regime
             df_novo['Data_Upload'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             
+            # Validar produtos
+            produtos_venda = set(df_novo['Produto'].unique())
+            produtos_cadastrados = set()
+            kits_cadastrados = set()
+            
+            if 'produtos' in st.session_state:
+                produtos_cadastrados = set(st.session_state['produtos']['Código'].tolist())
+            if 'kits' in st.session_state:
+                kits_cadastrados = set(st.session_state['kits']['Código Kit'].tolist())
+            
+            todos_cadastrados = produtos_cadastrados.union(kits_cadastrados)
+            produtos_faltantes = produtos_venda - todos_cadastrados
+            
+            if produtos_faltantes:
+                st.error(f"❌ {len(produtos_faltantes)} produto(s) não cadastrado(s)! Cadastre antes de enviar.")
+                
+                # Criar DataFrame para download
+                df_faltantes = pd.DataFrame({
+                    'Código': list(produtos_faltantes),
+                    'Custo (R$)': [0.0] * len(produtos_faltantes),
+                    'Preço Venda (R$)': [0.0] * len(produtos_faltantes),
+                    'Peso (g)': [0] * len(produtos_faltantes)
+                })
+                
+                # Botão download
+                import io
+                buffer = io.BytesIO()
+                df_faltantes.to_excel(buffer, index=False)
+                st.download_button(
+                    label="📥 Baixar lista de produtos faltantes",
+                    data=buffer.getvalue(),
+                    file_name="produtos_faltantes.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+                
+                st.warning("Preencha o arquivo e adicione na aba 'Produtos' do Google Sheets")
+                st.stop()
+            
             # Processar
             df_novo['Tipo'] = 'Desconhecido'
             df_novo['Custo_Produto'] = 0.0
