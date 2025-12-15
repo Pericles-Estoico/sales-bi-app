@@ -4,10 +4,20 @@ from datetime import datetime
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
+import unicodedata
 
 st.set_page_config(page_title="Sales BI Pro", page_icon="📊", layout="wide")
 
 CHANNELS = {'geral': '📊 Vendas Gerais', 'mercado_livre': '🛒 Mercado Livre', 'shopee_matriz': '🛍️ Shopee Matriz', 'shopee_150': '🏪 Shopee 1:50', 'shein': '👗 Shein'}
+
+def normalizar(texto):
+    """Remove acentos e converte para minúsculas para comparação"""
+    if pd.isna(texto):
+        return ''
+    texto = str(texto)
+    texto = unicodedata.normalize('NFD', texto)
+    texto = ''.join(c for c in texto if unicodedata.category(c) != 'Mn')
+    return texto.lower().strip()
 
 def converter_bling(df, data):
     d = pd.DataFrame()
@@ -148,17 +158,43 @@ with st.sidebar:
             df_novo['CNPJ'] = cnpj_regime
             df_novo['Data_Upload'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             
-            # Validar produtos
-            produtos_venda = set(df_novo['Produto'].unique())
-            produtos_config = set()
-            kits_config = set()
+            # Validar produtos (com normalização de acentos)
+            produtos_venda_orig = df_novo['Produto'].unique().tolist()
+            produtos_venda_norm = {normalizar(p): p for p in produtos_venda_orig}
+            
+            produtos_config_norm = {}
+            kits_config_norm = {}
+            estoque_norm = {}
+            
             estoque_produtos = st.session_state.get('estoque_produtos', set())
+            if estoque_produtos:
+                estoque_norm = {normalizar(p): p for p in estoque_produtos}
             
             if 'produtos' in st.session_state:
-                produtos_config = set(st.session_state['produtos']['Código'].tolist())
+                for p in st.session_state['produtos']['Código'].tolist():
+                    produtos_config_norm[normalizar(p)] = p
             if 'kits' in st.session_state:
-                kits_config = set(st.session_state['kits']['Código Kit'].tolist())
+                for k in st.session_state['kits']['Código Kit'].tolist():
+                    kits_config_norm[normalizar(k)] = k
             
+            todos_config_norm = {**produtos_config_norm, **kits_config_norm}
+            
+            # Mapear produtos da venda para códigos cadastrados
+            mapeamento = {}
+            for norm, orig in produtos_venda_norm.items():
+                if norm in todos_config_norm:
+                    mapeamento[orig] = todos_config_norm[norm]
+                elif norm in estoque_norm:
+                    mapeamento[orig] = estoque_norm[norm]
+            
+            # Atualizar df_novo com códigos normalizados
+            df_novo['Produto_Original'] = df_novo['Produto']
+            df_novo['Produto'] = df_novo['Produto'].apply(lambda x: mapeamento.get(x, x))
+            
+            # Recalcular sets para validação
+            produtos_venda = set(df_novo['Produto'].unique())
+            produtos_config = set(produtos_config_norm.values())
+            kits_config = set(kits_config_norm.values())
             todos_config = produtos_config.union(kits_config)
             
             # Validação cruzada
@@ -166,8 +202,9 @@ with st.sidebar:
             tem_erro = False
             
             # 1. Produtos não existem em template_estoque
-            if estoque_produtos:
-                nao_existe_estoque = produtos_venda - estoque_produtos - kits_config
+            estoque_set = set(estoque_norm.values()) if estoque_norm else set()
+            if estoque_set:
+                nao_existe_estoque = produtos_venda - estoque_set - kits_config
                 if nao_existe_estoque:
                     tem_erro = True
                     st.error(f"❌ {len(nao_existe_estoque)} produto(s) NÃO EXISTEM no estoque! Cadastre no app estoque-completo-v3 primeiro.")
@@ -184,8 +221,8 @@ with st.sidebar:
             
             # 2. Produtos existem em estoque mas não em Config_BI_Final
             produtos_sem_custo = produtos_venda - todos_config
-            if estoque_produtos:
-                produtos_sem_custo = produtos_sem_custo.intersection(estoque_produtos)  # Só os que existem no estoque
+            if estoque_set:
+                produtos_sem_custo = produtos_sem_custo.intersection(estoque_set)  # Só os que existem no estoque
             
             if produtos_sem_custo:
                 tem_erro = True
