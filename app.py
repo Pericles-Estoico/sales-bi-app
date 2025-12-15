@@ -78,8 +78,8 @@ if configs:
         st.metric("Canais", len(configs.get('canais', [])))
     with col3:
         if 'metas' in configs:
-            st.metric("Margem Meta", configs['metas'].iloc[0]['Valor Meta'])
-            st.metric("Markup Meta", configs['metas'].iloc[2]['Valor Meta'])
+            st.metric("Margem Meta", configs['metas'].iloc[0]['Valor'])
+            st.metric("Ticket Meta", configs['metas'].iloc[3]['Valor'])
     with col4:
         if 'custos_ped' in configs:
             custo_emb = configs['custos_ped']['Custo Unitário (R$)'].sum()
