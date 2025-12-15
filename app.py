@@ -50,9 +50,9 @@ try:
     
     # Carregar configs
     configs = {}
-    for nome, key in [("0. Produtos", "produtos"), ("0. Kits", "kits"), 
-                      ("0. Canais", "canais"), ("0. Custos Pedido", "custos_ped"), ("0. Impostos", "impostos"),
-                      ("0. Frete", "frete"), ("0. Metas", "metas")]:
+    for nome, key in [("Produtos", "produtos"), ("Kits", "kits"), 
+                      ("Canais", "canais"), ("Custos por Pedido", "custos_ped"), ("Impostos", "impostos"),
+                      ("Frete", "frete"), ("Metas", "metas")]:
         try:
             sh = ss.worksheet(nome)
             data = sh.get_all_values()
@@ -93,13 +93,13 @@ with st.sidebar:
     if config_file and st.button("💾 Salvar"):
         try:
             sheets_map = {
-                '1. Produtos': '0. Produtos',
-                '2. Kits': '0. Kits',
-                '3. Custos por Pedido': '0. Custos Pedido',
-                '4. Canais': '0. Canais',
-                '5. Impostos': '0. Impostos',
-                '6. Frete': '0. Frete',
-                '7. Metas': '0. Metas'
+                'Produtos': 'Produtos',
+                'Kits': 'Kits',
+                'Custos por Pedido': 'Custos por Pedido',
+                'Canais': 'Canais',
+                'Impostos': 'Impostos',
+                'Frete': 'Frete',
+                'Metas': 'Metas'
             }
             
             for sheet_orig, sheet_dest in sheets_map.items():
