@@ -28,6 +28,7 @@ def converter_bling(df, data):
     return d
 
 # Conectar
+configs = {}
 try:
     scope = ['https://spreadsheets.google.com/feeds','https://www.googleapis.com/auth/drive']
     creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(st.secrets["GOOGLE_SHEETS_CREDENTIALS"]), scope)
