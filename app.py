@@ -398,6 +398,121 @@ with st.sidebar:
                 sh_exec.clear()
                 sh_exec.update('A1', d_exec)
                 
+                # === ABA PREÇOS MARKETPLACES ===
+                try:
+                    sh_precos = ss.worksheet("4. Preços Marketplaces")
+                except:
+                    sh_precos = ss.add_worksheet("4. Preços Marketplaces", 1000, 20)
+                
+                # Ler preços existentes ou criar novo
+                try:
+                    precos_ex = sh_precos.get_all_values()
+                    df_precos = pd.DataFrame(precos_ex[1:], columns=precos_ex[0]) if len(precos_ex) > 1 else pd.DataFrame()
+                except:
+                    df_precos = pd.DataFrame()
+                
+                # Calcular preço real por produto/canal
+                canal_atual = df_novo['Canal'].iloc[0] if len(df_novo) > 0 else 'Geral'
+                
+                # Mapear canal para coluna
+                canal_map = {
+                    '📊 Vendas Gerais': 'Geral',
+                    '🛒 Mercado Livre': 'ML',
+                    '🛍️ Shopee Matriz': 'Shopee_Matriz',
+                    '🏪 Shopee 1:50': 'Shopee_150',
+                    '👗 Shein': 'Shein'
+                }
+                col_canal = canal_map.get(canal_atual, 'Geral')
+                
+                # Agregar por produto para obter preço médio real
+                preco_real = df_novo.groupby('Produto').agg({
+                    'Total': 'sum', 'Quantidade': 'sum'
+                }).reset_index()
+                preco_real['Preco_Unit'] = preco_real['Total'] / preco_real['Quantidade']
+                
+                # Obter custos dos produtos
+                produtos_df = st.session_state.get('produtos', pd.DataFrame())
+                canais_df = st.session_state.get('canais', pd.DataFrame())
+                
+                # Obter taxa do canal
+                taxa_canal = 0.16
+                if not canais_df.empty:
+                    for _, c in canais_df.iterrows():
+                        if col_canal.lower() in str(c.get('Canal', '')).lower():
+                            taxa_canal = c.get('Taxa Marketplace (%)', 16) / 100
+                            break
+                
+                # Criar/atualizar tabela de preços
+                colunas_precos = ['Código', 'Custo (R$)', 'ML', 'M.C ML', 'Shopee_Matriz', 'M.C SM', 'Shopee_150', 'M.C S150', 'Shein', 'M.C Shein', 'Ecommerce', 'M.C Ecom', 'Média M.C']
+                
+                if df_precos.empty:
+                    df_precos = pd.DataFrame(columns=colunas_precos)
+                
+                # Atualizar preços para o canal atual
+                for _, row in preco_real.iterrows():
+                    prod = row['Produto']
+                    preco = row['Preco_Unit']
+                    
+                    # Buscar custo
+                    custo = 0
+                    prod_norm = normalizar(prod)
+                    if not produtos_df.empty:
+                        for _, p in produtos_df.iterrows():
+                            if normalizar(p['Código']) == prod_norm:
+                                custo = p.get('Custo (R$)', 0) or 0
+                                break
+                    
+                    # Calcular M.C = (Preço - Custo - Taxas) / Preço * 100
+                    mc = ((preco - custo - (preco * taxa_canal)) / preco * 100) if preco > 0 else 0
+                    
+                    # Verificar se produto já existe na tabela
+                    if prod in df_precos['Código'].values:
+                        idx = df_precos[df_precos['Código'] == prod].index[0]
+                        df_precos.loc[idx, col_canal] = preco
+                        df_precos.loc[idx, f'M.C {col_canal[:2]}'] = mc
+                    else:
+                        nova_linha = {c: '' for c in colunas_precos}
+                        nova_linha['Código'] = prod
+                        nova_linha['Custo (R$)'] = custo
+                        nova_linha[col_canal] = preco
+                        # Encontrar coluna M.C correta
+                        mc_cols = {'ML': 'M.C ML', 'Shopee_Matriz': 'M.C SM', 'Shopee_150': 'M.C S150', 'Shein': 'M.C Shein', 'Ecommerce': 'M.C Ecom'}
+                        if col_canal in mc_cols:
+                            nova_linha[mc_cols[col_canal]] = mc
+                        df_precos = pd.concat([df_precos, pd.DataFrame([nova_linha])], ignore_index=True)
+                
+                # Calcular Média M.C para cada produto
+                mc_colunas = ['M.C ML', 'M.C SM', 'M.C S150', 'M.C Shein', 'M.C Ecom']
+                for idx, row in df_precos.iterrows():
+                    mcs = []
+                    for mc_col in mc_colunas:
+                        if mc_col in df_precos.columns:
+                            val = row.get(mc_col, '')
+                            if val != '' and pd.notna(val):
+                                try:
+                                    mcs.append(float(val))
+                                except: pass
+                    df_precos.loc[idx, 'Média M.C'] = sum(mcs) / len(mcs) if mcs else 0
+                
+                # Formatar e enviar
+                d_precos = [colunas_precos]
+                for _, row in df_precos.iterrows():
+                    linha = []
+                    for col in colunas_precos:
+                        val = row.get(col, '')
+                        if 'R$' in col or col in ['ML', 'Shopee_Matriz', 'Shopee_150', 'Shein', 'Ecommerce', 'Custo (R$)']:
+                            linha.append(f'R$ {float(val):.2f}' if val != '' and pd.notna(val) else '')
+                        elif 'M.C' in col or 'Média' in col:
+                            linha.append(f'{float(val):.1f}%' if val != '' and pd.notna(val) else '')
+                        else:
+                            linha.append(str(val))
+                    d_precos.append(linha)
+                
+                sh_precos.clear()
+                sh_precos.update('A1', d_precos)
+                
+                # === FIM ABA PREÇOS MARKETPLACES ===
+                
                 cols = ['Data', 'Produto', 'Tipo', 'Qtd', 'Total', 'Custo', 'Lucro', 'Margem%', 'Canal', 'CNPJ', 'BCG']
                 d6 = [cols]
                 for _, r in df_full.iterrows():
