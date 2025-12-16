@@ -56,6 +56,7 @@ try:
                 df = pd.DataFrame(data[1:], columns=data[0])
                 for col in df.columns:
                     if any(x in col for x in ['R$', '%', 'Peso', 'Custo', 'Preço', 'Taxa', 'Frete', 'Valor']):
+                        df[col] = df[col].apply(lambda x: str(x).replace(',', '.') if pd.notna(x) else x)
                         df[col] = pd.to_numeric(df[col], errors='coerce')
                 configs[key] = df
                 st.session_state[key] = df
