@@ -278,6 +278,7 @@ with st.sidebar:
                     sh = ss.add_worksheet("6. Detalhes", 5000, 20)
                 
                 df_full = pd.concat([df_ex, df_novo], ignore_index=True) if not df_ex.empty else df_novo
+                df_full = df_full.fillna(0)  # Substituir NaN por 0 para evitar erro JSON
                 
                 agg = {'Quantidade':'sum','Total':'sum','Custo_Total':'sum','Margem_Bruta':'sum','Lucro_Liquido':'sum'}
                 if 'Impostos' in df_full.columns:
