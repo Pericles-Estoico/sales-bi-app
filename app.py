@@ -111,6 +111,13 @@ if configs:
 
 # Sidebar
 with st.sidebar:
+    st.header("🎲 Controles")
+    
+    modo_teste = st.checkbox("🧪 Modo Teste (simulação)", value=False)
+    if modo_teste:
+        st.warning("⚠️ Simulação ativa - dados NÃO serão salvos")
+    
+    st.divider()
     st.header("⚙️ Configurações")
     
     config_file = st.file_uploader("📋 Atualizar Config", type=['xlsx'])
@@ -352,9 +359,16 @@ with st.sidebar:
             st.error(f"❌ {e}")
 
 if 'data_novo' in st.session_state:
-    if st.button("📤 Enviar para Google Sheets"):
-        try:
-            df_novo = st.session_state['data_novo']
+    btn_label = "🧪 Simular Envio" if modo_teste else "📤 Enviar para Google Sheets"
+    if st.button(btn_label):
+        if modo_teste:
+            st.success("✅ SIMULAÇÃO: Dados processados com sucesso!")
+            st.info("📊 Preview dos dados que seriam enviados:")
+            st.dataframe(st.session_state['data_novo'])
+            st.warning("⚠️ Modo Teste ativo - dados NÃO foram salvos no Google Sheets")
+        else:
+            try:
+                df_novo = st.session_state['data_novo']
             
             # Ler dados existentes
             try:
