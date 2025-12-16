@@ -193,17 +193,33 @@ with st.sidebar:
                 custo_unit = 0
                 tipo = 'Simples'
                 
-                if not produtos_df.empty and prod in produtos_df['Código'].values:
-                    p = produtos_df[produtos_df['Código'] == prod].iloc[0]
-                    custo_unit = p.get('Custo (R$)', 0)
-                elif not kits_df.empty and prod in kits_df['Código Kit'].values:
-                    tipo = 'Kit'
-                    k = kits_df[kits_df['Código Kit'] == prod].iloc[0]
-                    comps = k['SKUs Componentes'].split(';')
-                    qtds = [int(q) for q in k['Qtd Componentes'].split(';')]
-                    for comp, q in zip(comps, qtds):
-                        if comp in produtos_df['Código'].values:
-                            custo_unit += produtos_df[produtos_df['Código'] == comp].iloc[0].get('Custo (R$)', 0) * q
+                # Normalizar para busca
+                prod_norm = normalizar(prod)
+                
+                # Buscar em produtos
+                prod_encontrado = False
+                if not produtos_df.empty:
+                    for _, p in produtos_df.iterrows():
+                        if normalizar(p['Código']) == prod_norm:
+                            custo_unit = p.get('Custo (R$)', 0) or 0
+                            prod_encontrado = True
+                            break
+                
+                # Buscar em kits
+                if not prod_encontrado and not kits_df.empty:
+                    for _, k in kits_df.iterrows():
+                        if normalizar(k['Código Kit']) == prod_norm:
+                            tipo = 'Kit'
+                            comps = str(k.get('SKUs Componentes', '')).split(';')
+                            qtds_str = str(k.get('Qtd Componentes', '1')).split(';')
+                            qtds_comp = [int(q) if q.strip().isdigit() else 1 for q in qtds_str]
+                            for comp, q in zip(comps, qtds_comp):
+                                comp_norm = normalizar(comp)
+                                for _, p in produtos_df.iterrows():
+                                    if normalizar(p['Código']) == comp_norm:
+                                        custo_unit += (p.get('Custo (R$)', 0) or 0) * q
+                                        break
+                            break
                 
                 custo_total = custo_unit * qtd
                 margem_bruta = total - custo_total
