@@ -170,7 +170,7 @@ with st.sidebar:
             custos_ped_df = st.session_state.get('custos_ped', pd.DataFrame())
             
             aliquota = 0.06
-            if not impostos_df.empty:
+            if not impostos_df.empty and 'Tipo' in impostos_df.columns:
                 imp = impostos_df[impostos_df['Tipo'].str.contains(cnpj_regime.split()[0], case=False, na=False)]
                 if len(imp) > 0:
                     aliquota = imp.iloc[0]['Alíquota (%)'] / 100
