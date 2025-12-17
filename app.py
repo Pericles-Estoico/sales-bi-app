@@ -532,5 +532,157 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"❌ {e}")
 
+# === FUNÇÃO GERAR RELATÓRIO EXCEL ===
+def gerar_relatorio_excel(df_dados, titulo, canais_df, produtos_df):
+    """Gera relatório Excel com múltiplas abas"""
+    output = io.BytesIO()
+    
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # ABA 1: DASHBOARD
+        total_fat = df_dados['Total'].sum()
+        total_lucro = df_dados['Lucro_Liquido'].sum() if 'Lucro_Liquido' in df_dados.columns else 0
+        total_custo = df_dados['Custo_Total'].sum() if 'Custo_Total' in df_dados.columns else 0
+        margem_pct = (total_lucro / total_fat * 100) if total_fat > 0 else 0
+        
+        dash = pd.DataFrame({
+            'Indicador': ['Faturamento Total', 'Custo Total', 'Lucro Líquido', 'Margem %', 'Produtos Vendidos', 'Quantidade Total'],
+            'Valor': [f'R$ {total_fat:,.2f}', f'R$ {total_custo:,.2f}', f'R$ {total_lucro:,.2f}', f'{margem_pct:.1f}%', len(df_dados['Produto'].unique()), int(df_dados['Quantidade'].sum())]
+        })
+        dash.to_excel(writer, sheet_name='Dashboard', index=False)
+        
+        # ABA 2: BCG POR CANAL
+        bcg_canal = []
+        for canal in df_dados['Canal'].unique():
+            df_canal = df_dados[df_dados['Canal'] == canal]
+            prods_canal = df_canal.groupby('Produto').agg({'Quantidade':'sum','Total':'sum','Lucro_Liquido':'sum'}).reset_index()
+            total_canal = prods_canal['Total'].sum()
+            prods_canal['Part%'] = (prods_canal['Total']/total_canal)*100 if total_canal > 0 else 0
+            med_q = prods_canal['Quantidade'].median()
+            med_p = prods_canal['Part%'].median()
+            for _, r in prods_canal.iterrows():
+                if r['Quantidade'] >= med_q and r['Part%'] >= med_p: bcg = 'Estrela'
+                elif r['Quantidade'] < med_q and r['Part%'] >= med_p: bcg = 'Vaca Leiteira'
+                elif r['Quantidade'] >= med_q and r['Part%'] < med_p: bcg = 'Interrogação'
+                else: bcg = 'Abacaxi'
+                bcg_canal.append({'Canal': canal, 'Produto': r['Produto'], 'Qtd': r['Quantidade'], 'Faturamento': r['Total'], 'Lucro': r['Lucro_Liquido'], 'BCG': bcg})
+        
+        df_bcg = pd.DataFrame(bcg_canal)
+        if not df_bcg.empty:
+            df_bcg.to_excel(writer, sheet_name='BCG por Canal', index=False)
+        
+        # ABA 2B: BCG GERAL (TODOS OS CANAIS CONSOLIDADOS)
+        prods_geral = df_dados.groupby('Produto').agg({'Quantidade':'sum','Total':'sum','Lucro_Liquido':'sum'}).reset_index()
+        total_geral = prods_geral['Total'].sum()
+        prods_geral['Part%'] = (prods_geral['Total']/total_geral)*100 if total_geral > 0 else 0
+        med_q_geral = prods_geral['Quantidade'].median()
+        med_p_geral = prods_geral['Part%'].median()
+        
+        bcg_geral = []
+        for _, r in prods_geral.iterrows():
+            if r['Quantidade'] >= med_q_geral and r['Part%'] >= med_p_geral: bcg = 'Estrela'
+            elif r['Quantidade'] < med_q_geral and r['Part%'] >= med_p_geral: bcg = 'Vaca Leiteira'
+            elif r['Quantidade'] >= med_q_geral and r['Part%'] < med_p_geral: bcg = 'Interrogação'
+            else: bcg = 'Abacaxi'
+            bcg_geral.append({'Produto': r['Produto'], 'Qtd': r['Quantidade'], 'Faturamento': f"R$ {r['Total']:,.2f}", 'Lucro': f"R$ {r['Lucro_Liquido']:,.2f}", 'Part%': f"{r['Part%']:.1f}%", 'BCG': bcg})
+        
+        df_bcg_geral = pd.DataFrame(bcg_geral)
+        if not df_bcg_geral.empty:
+            # Resumo BCG Geral
+            resumo_bcg = df_bcg_geral.groupby('BCG').size().reset_index(name='Quantidade')
+            resumo_bcg.to_excel(writer, sheet_name='BCG Geral Resumo', index=False)
+            df_bcg_geral.to_excel(writer, sheet_name='BCG Geral Detalhado', index=False)
+        
+        # ABA 3: MARGENS POR PRODUTO/CANAL
+        margens = df_dados.groupby(['Canal', 'Produto']).agg({
+            'Total': 'sum', 'Custo_Total': 'sum', 'Lucro_Liquido': 'sum', 'Quantidade': 'sum'
+        }).reset_index()
+        margens['M.C (R$)'] = margens['Lucro_Liquido']
+        margens['M.C (%)'] = (margens['Lucro_Liquido'] / margens['Total'] * 100).round(1)
+        margens = margens.rename(columns={'Total': 'Faturamento (R$)', 'Custo_Total': 'Custo (R$)', 'Lucro_Liquido': 'Lucro (R$)'})
+        margens.to_excel(writer, sheet_name='Margens', index=False)
+        
+        # ABA 4: RECOMENDAÇÕES POR CANAL
+        recomendacoes = []
+        for canal in df_dados['Canal'].unique():
+            df_canal = df_dados[df_dados['Canal'] == canal]
+            fat_canal = df_canal['Total'].sum()
+            lucro_canal = df_canal['Lucro_Liquido'].sum() if 'Lucro_Liquido' in df_canal.columns else 0
+            margem_canal = (lucro_canal / fat_canal * 100) if fat_canal > 0 else 0
+            
+            # Produtos estrela do canal
+            prods_canal = df_canal.groupby('Produto').agg({'Total':'sum','Lucro_Liquido':'sum'}).reset_index()
+            top_lucro = prods_canal.nlargest(3, 'Lucro_Liquido')['Produto'].tolist()
+            piores = prods_canal[prods_canal['Lucro_Liquido'] <= 0]['Produto'].tolist()[:3]
+            
+            dica = ''
+            if margem_canal < 10:
+                dica = f'⚠️ ALERTA: Margem baixa ({margem_canal:.1f}%). Revisar preços ou custos.'
+            elif margem_canal < 20:
+                dica = f'🟡 ATENÇÃO: Margem moderada ({margem_canal:.1f}%). Oportunidade de otimização.'
+            else:
+                dica = f'✅ BOM: Margem saudável ({margem_canal:.1f}%). Manter estratégia.'
+            
+            recomendacoes.append({
+                'Canal': canal,
+                'Faturamento': f'R$ {fat_canal:,.2f}',
+                'Lucro': f'R$ {lucro_canal:,.2f}',
+                'Margem %': f'{margem_canal:.1f}%',
+                'Top 3 Lucrativos': ', '.join(top_lucro),
+                'Produtos em Prejuízo': ', '.join(piores) if piores else 'Nenhum',
+                'Recomendação': dica
+            })
+        
+        df_rec = pd.DataFrame(recomendacoes)
+        df_rec.to_excel(writer, sheet_name='Recomendações', index=False)
+    
+    output.seek(0)
+    return output
+
+# === BOTÕES DE DOWNLOAD ===
+if 'data_novo' in st.session_state and configs:
+    st.divider()
+    st.subheader("📊 Relatórios para Download")
+    
+    col_dl1, col_dl2 = st.columns(2)
+    
+    df_atual = st.session_state['data_novo']
+    produtos_df = st.session_state.get('produtos', pd.DataFrame())
+    canais_df = st.session_state.get('canais', pd.DataFrame())
+    
+    # Botão 1: Relatório do Dia
+    with col_dl1:
+        if 'Lucro_Liquido' in df_atual.columns:
+            excel_dia = gerar_relatorio_excel(df_atual, 'Relatório do Dia', canais_df, produtos_df)
+            data_rel = df_atual['Data'].iloc[0] if 'Data' in df_atual.columns else datetime.now().strftime('%Y-%m-%d')
+            st.download_button(
+                label="📅 Baixar Relatório do Dia",
+                data=excel_dia,
+                file_name=f"relatorio_dia_{data_rel}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+    
+    # Botão 2: Relatório Geral (se houver dados históricos)
+    with col_dl2:
+        try:
+            sh_det = ss.worksheet("6. Detalhes")
+            dados_hist = sh_det.get_all_values()
+            if len(dados_hist) > 1:
+                df_hist = pd.DataFrame(dados_hist[1:], columns=dados_hist[0])
+                for c in ['Quantidade','Total','Custo','Lucro']:
+                    if c in df_hist.columns:
+                        df_hist[c] = pd.to_numeric(df_hist[c].apply(lambda x: str(x).replace(',', '.')), errors='coerce')
+                df_hist = df_hist.rename(columns={'Custo': 'Custo_Total', 'Lucro': 'Lucro_Liquido', 'Qtd': 'Quantidade'})
+                df_hist = df_hist.fillna(0)
+                
+                excel_geral = gerar_relatorio_excel(df_hist, 'Relatório Geral', canais_df, produtos_df)
+                st.download_button(
+                    label="📊 Baixar Relatório Geral",
+                    data=excel_geral,
+                    file_name=f"relatorio_geral_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+        except:
+            st.info("📝 Envie dados para gerar relatório geral")
+
 if not configs:
     st.info("👈 Configure a planilha Google Sheets primeiro")
