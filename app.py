@@ -63,8 +63,9 @@ try:
                 df = pd.DataFrame(data[1:], columns=data[0])
                 for col in df.columns:
                     if any(x in col for x in ['R$', '%', 'Peso', 'Custo', 'Preço', 'Taxa', 'Frete', 'Valor']):
-                        df[col] = df[col].apply(lambda x: str(x).replace(',', '.') if pd.notna(x) else x)
-                        df[col] = pd.to_numeric(df[col], errors='coerce')
+                        # Limpeza robusta: remove R$, espaços e converte vírgula para ponto
+                        df[col] = df[col].apply(lambda x: str(x).replace('R$', '').replace(' ', '').replace(',', '.') if pd.notna(x) else x)
+                        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
                 configs[key] = df
                 st.session_state[key] = df
         except: pass
@@ -101,6 +102,10 @@ with st.sidebar:
     cnpj_regime = st.selectbox("CNPJ/Regime", ['Simples Nacional', 'Lucro Presumido', 'Lucro Real'])
     if formato == 'Bling':
         data_venda = st.date_input("Data", datetime.now())
+    
+    # Novo campo para Ads/Campanhas
+    custo_ads = st.number_input("💰 Investimento em Ads/Campanhas do Dia (R$)", min_value=0.0, value=0.0, step=10.0)
+    
     uploaded_file = st.file_uploader("Excel", type=['xlsx'])
     
     if uploaded_file and st.button("🔄 Processar"):
@@ -194,6 +199,9 @@ with st.sidebar:
             
             custo_emb = custos_ped_df['Custo Unitário (R$)'].sum() if not custos_ped_df.empty else 0
             
+            # Calcular rateio de Ads proporcional ao valor total da venda
+            total_vendas_dia = df_novo['Total'].sum()
+            
             resultados = []
             for _, row in df_novo.iterrows():
                 prod = row['Produto']
@@ -235,7 +243,11 @@ with st.sidebar:
                 margem_bruta = total - custo_total
                 impostos = total * aliquota
                 taxa_total = (total * taxa_mp) + taxa_fixa + custo_emb
-                lucro = margem_bruta - impostos - taxa_total
+                
+                # Rateio de Ads
+                rateio_ads = (total / total_vendas_dia * custo_ads) if total_vendas_dia > 0 else 0
+                
+                lucro = margem_bruta - impostos - taxa_total - rateio_ads
                 margem_pct = (lucro / total * 100) if total > 0 else 0
                 
                 resultados.append({
@@ -247,6 +259,7 @@ with st.sidebar:
                     'Custo_Total': custo_total,
                     'Margem_Bruta': margem_bruta,
                     'Impostos': impostos,
+                    'Ads_Campanhas': rateio_ads,
                     'Lucro_Liquido': lucro,
                     'Margem_%': margem_pct,
                     'Canal': row['Canal'],
