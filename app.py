@@ -27,13 +27,20 @@ def converter_bling(df, data):
     d['Preço Unitário'] = d['Total'] / d['Quantidade']
     return d
 
-# Conectar
-configs = {}
-try:
+# Conectar com Cache
+@st.cache_resource
+def conectar_google_sheets():
     scope = ['https://spreadsheets.google.com/feeds','https://www.googleapis.com/auth/drive']
     creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(st.secrets["GOOGLE_SHEETS_CREDENTIALS"]), scope)
     gc = gspread.authorize(creds)
     ss = gc.open_by_url(st.secrets["GOOGLE_SHEETS_URL"])
+    return ss, gc
+
+configs = {}
+ss = None
+
+try:
+    ss, gc = conectar_google_sheets()
     
     estoque_produtos = set()
     if "TEMPLATE_ESTOQUE_URL" in st.secrets:
@@ -61,7 +68,8 @@ try:
                 configs[key] = df
                 st.session_state[key] = df
         except: pass
-except: st.error("❌ Erro conexão")
+except Exception as e:
+    st.error(f"❌ Erro conexão: {str(e)}")
 
 st.title("📊 Sales BI Pro - Dashboard Executivo")
 
