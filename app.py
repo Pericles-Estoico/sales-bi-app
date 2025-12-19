@@ -9,13 +9,14 @@ import io
 import time
 
 # ==============================================================================
-# VERSÃO V12 - FINAL E ROBUSTA
+# VERSÃO V13 - FINAL E BLINDADA
 # CORREÇÕES:
 # 1. Autenticação restaurada (GOOGLE_SHEETS_CREDENTIALS)
 # 2. Matriz BCG implementada
 # 3. Correção de valores monetários (R$)
 # 4. Correção de abas vazias
-# 5. CORREÇÃO CRÍTICA: Leitura de quantidades de Kits com vírgula (ex: 1,1)
+# 5. Correção de leitura de float com vírgula (Kits)
+# 6. CORREÇÃO CRÍTICA: Verifica e recria cabeçalho se a aba estiver vazia
 # ==============================================================================
 
 # ==============================================================================
@@ -278,11 +279,9 @@ def processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads_total):
                 skus = comps_str.split(';')
                 qtds = qtds_str.split(';') if ';' in qtds_str else [1]*len(skus)
                 for s, q in zip(skus, qtds):
-                    # CORREÇÃO AQUI: clean_float em vez de float direto
                     qtd_val = clean_float(q) if q else 1.0
                     componentes.append({'sku': s.strip(), 'qtd': qtd_val})
             else:
-                # CORREÇÃO AQUI: clean_float em vez de float direto
                 qtd_val = clean_float(qtds_str) if qtds_str else 1.0
                 componentes.append({'sku': comps_str.strip(), 'qtd': qtd_val})
             
@@ -443,7 +442,7 @@ except Exception as e:
     st.error(f"❌ Erro crítico de conexão: {str(e)}")
     st.stop()
 
-st.title("📊 Sales BI Pro - Dashboard Executivo V12")
+st.title("📊 Sales BI Pro - Dashboard Executivo V13")
 
 # Sidebar
 with st.sidebar:
@@ -473,6 +472,12 @@ with st.sidebar:
                 if df_processado is not None and not df_processado.empty:
                     # Salvar Detalhes (Append)
                     ws_detalhes = ss.worksheet("6. Detalhes")
+                    
+                    # CORREÇÃO V13: Verificar se a aba está vazia e adicionar cabeçalho
+                    dados_existentes = ws_detalhes.get_all_values()
+                    if len(dados_existentes) == 0:
+                        # Se vazia, adiciona cabeçalho primeiro
+                        ws_detalhes.append_row(df_processado.columns.tolist())
                     
                     # Formatar para salvar (converter floats para strings com vírgula)
                     df_salvar = df_processado.copy()
