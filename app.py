@@ -36,39 +36,57 @@ def conectar_google_sheets():
     ss = gc.open_by_url(st.secrets["GOOGLE_SHEETS_URL"])
     return ss, gc
 
+@st.cache_data(ttl=3600)  # Cache por 1 hora
+def carregar_configuracoes():
+    try:
+        ss, gc = conectar_google_sheets()
+        configs_data = {}
+        
+        # Carregar Estoque
+        estoque_produtos = set()
+        if "TEMPLATE_ESTOQUE_URL" in st.secrets:
+            try:
+                ss_estoque = gc.open_by_url(st.secrets["TEMPLATE_ESTOQUE_URL"])
+                ws_estoque = ss_estoque.worksheet('template_estoque')
+                df_estoque = pd.DataFrame(ws_estoque.get_all_records())
+                if 'codigo' in df_estoque.columns:
+                    estoque_produtos = set(df_estoque['codigo'].tolist())
+            except: pass
+        
+        # Carregar Abas de Configuração
+        for nome, key in [("Produtos", "produtos"), ("Kits", "kits"), ("Canais", "canais"), 
+                          ("Custos por Pedido", "custos_ped"), ("Impostos", "impostos"), ("Frete", "frete"), ("Metas", "metas")]:
+            try:
+                sh = ss.worksheet(nome)
+                data = sh.get_all_values()
+                if len(data) > 1:
+                    df = pd.DataFrame(data[1:], columns=data[0])
+                    for col in df.columns:
+                        if any(x in col for x in ['R$', '%', 'Peso', 'Custo', 'Preço', 'Taxa', 'Frete', 'Valor']):
+                            df[col] = df[col].apply(lambda x: str(x).replace('R$', '').replace(' ', '').replace(',', '.') if pd.notna(x) else x)
+                            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+                    configs_data[key] = df
+            except: pass
+            
+        return configs_data, estoque_produtos
+    except Exception as e:
+        return None, None
+
 configs = {}
 ss = None
+estoque_produtos = set()
 
 try:
     ss, gc = conectar_google_sheets()
+    configs, estoque_produtos = carregar_configuracoes()
     
-    estoque_produtos = set()
-    if "TEMPLATE_ESTOQUE_URL" in st.secrets:
-        try:
-            ss_estoque = gc.open_by_url(st.secrets["TEMPLATE_ESTOQUE_URL"])
-            ws_estoque = ss_estoque.worksheet('template_estoque')
-            df_estoque = pd.DataFrame(ws_estoque.get_all_records())
-            if 'codigo' in df_estoque.columns:
-                estoque_produtos = set(df_estoque['codigo'].tolist())
-            st.session_state['estoque_produtos'] = estoque_produtos
-        except: pass
-    
-    configs = {}
-    for nome, key in [("Produtos", "produtos"), ("Kits", "kits"), ("Canais", "canais"), 
-                      ("Custos por Pedido", "custos_ped"), ("Impostos", "impostos"), ("Frete", "frete"), ("Metas", "metas")]:
-        try:
-            sh = ss.worksheet(nome)
-            data = sh.get_all_values()
-            if len(data) > 1:
-                df = pd.DataFrame(data[1:], columns=data[0])
-                for col in df.columns:
-                    if any(x in col for x in ['R$', '%', 'Peso', 'Custo', 'Preço', 'Taxa', 'Frete', 'Valor']):
-                        # Limpeza robusta: remove R$, espaços e converte vírgula para ponto
-                        df[col] = df[col].apply(lambda x: str(x).replace('R$', '').replace(' ', '').replace(',', '.') if pd.notna(x) else x)
-                        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-                configs[key] = df
-                st.session_state[key] = df
-        except: pass
+    if configs:
+        for key, df in configs.items():
+            st.session_state[key] = df
+        st.session_state['estoque_produtos'] = estoque_produtos
+    else:
+        st.error("❌ Erro ao carregar configurações. Verifique a conexão.")
+        
 except Exception as e:
     st.error(f"❌ Erro conexão: {str(e)}")
 
