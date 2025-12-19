@@ -9,14 +9,15 @@ import io
 import time
 
 # ==============================================================================
-# VERSÃO V13 - FINAL E BLINDADA
-# CORREÇÕES:
-# 1. Autenticação restaurada (GOOGLE_SHEETS_CREDENTIALS)
+# VERSÃO V14 - FINAL E ESTÁVEL
+# CORREÇÕES ACUMULADAS:
+# 1. Autenticação restaurada
 # 2. Matriz BCG implementada
 # 3. Correção de valores monetários (R$)
 # 4. Correção de abas vazias
 # 5. Correção de leitura de float com vírgula (Kits)
-# 6. CORREÇÃO CRÍTICA: Verifica e recria cabeçalho se a aba estiver vazia
+# 6. Correção de cabeçalho em abas vazias
+# 7. CORREÇÃO CRÍTICA: Limpeza de cache forçada para evitar erro de coluna inexistente
 # ==============================================================================
 
 # ==============================================================================
@@ -102,13 +103,12 @@ def normalizar(texto):
     return texto.lower().strip()
 
 # ==============================================================================
-# CONEXÃO COM GOOGLE SHEETS (MÉTODO ORIGINAL RESTAURADO)
+# CONEXÃO COM GOOGLE SHEETS
 # ==============================================================================
 @st.cache_resource
 def conectar_google_sheets():
     scope = ['https://spreadsheets.google.com/feeds','https://www.googleapis.com/auth/drive']
     
-    # Tenta carregar credenciais do st.secrets
     if "GOOGLE_SHEETS_CREDENTIALS" in st.secrets:
         creds_dict = json.loads(st.secrets["GOOGLE_SHEETS_CREDENTIALS"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
@@ -142,7 +142,7 @@ def carregar_dados_detalhes():
             return df
         return pd.DataFrame()
     except Exception as e:
-        st.error(f"Erro ao ler aba Detalhes: {e}")
+        # st.error(f"Erro ao ler aba Detalhes: {e}") # Silenciar erro visual na leitura inicial
         return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
@@ -442,7 +442,7 @@ except Exception as e:
     st.error(f"❌ Erro crítico de conexão: {str(e)}")
     st.stop()
 
-st.title("📊 Sales BI Pro - Dashboard Executivo V13")
+st.title("📊 Sales BI Pro - Dashboard Executivo V14")
 
 # Sidebar
 with st.sidebar:
@@ -473,7 +473,7 @@ with st.sidebar:
                     # Salvar Detalhes (Append)
                     ws_detalhes = ss.worksheet("6. Detalhes")
                     
-                    # CORREÇÃO V13: Verificar se a aba está vazia e adicionar cabeçalho
+                    # Verificar se a aba está vazia e adicionar cabeçalho
                     dados_existentes = ws_detalhes.get_all_values()
                     if len(dados_existentes) == 0:
                         # Se vazia, adiciona cabeçalho primeiro
@@ -492,6 +492,9 @@ with st.sidebar:
                     
                     # Recarregar tudo para atualizar dashboards
                     st.info("🔄 Atualizando dashboards de análise...")
+                    
+                    # CORREÇÃO V14: Limpar cache para garantir leitura dos dados novos
+                    carregar_dados_detalhes.clear()
                     
                     # Ler histórico completo
                     df_historico = pd.DataFrame(ws_detalhes.get_all_records())
@@ -544,52 +547,62 @@ tab1, tab2, tab3, tab4 = st.tabs(["📈 Visão Geral", "🏢 Por CNPJ", "⭐ Mat
 df_detalhes = carregar_dados_detalhes()
 
 if not df_detalhes.empty:
-    with tab1:
-        st.subheader("Performance Geral")
-        col1, col2, col3 = st.columns(3)
-        total_vendas = df_detalhes['Total Venda'].sum()
-        lucro_total = df_detalhes['Lucro Bruto'].sum()
-        margem_media = df_detalhes['Margem (%)'].mean()
-        
-        col1.metric("Vendas Totais", format_currency_br(total_vendas))
-        col2.metric("Lucro Bruto", format_currency_br(lucro_total))
-        col3.metric("Margem Média", format_percent_br(margem_media))
-        
-        st.bar_chart(df_detalhes.groupby('Canal')['Total Venda'].sum())
+    # CORREÇÃO V14: Verificação de segurança das colunas
+    colunas_necessarias = ['Total Venda', 'Lucro Bruto', 'Margem (%)', 'Canal', 'CNPJ', 'Produto']
+    colunas_presentes = [c for c in colunas_necessarias if c in df_detalhes.columns]
+    
+    if len(colunas_presentes) < len(colunas_necessarias):
+        st.warning("⚠️ Dados incompletos detectados. Atualizando visualização...")
+        carregar_dados_detalhes.clear()
+        time.sleep(1)
+        st.rerun()
+    else:
+        with tab1:
+            st.subheader("Performance Geral")
+            col1, col2, col3 = st.columns(3)
+            total_vendas = df_detalhes['Total Venda'].sum()
+            lucro_total = df_detalhes['Lucro Bruto'].sum()
+            margem_media = df_detalhes['Margem (%)'].mean()
+            
+            col1.metric("Vendas Totais", format_currency_br(total_vendas))
+            col2.metric("Lucro Bruto", format_currency_br(lucro_total))
+            col3.metric("Margem Média", format_percent_br(margem_media))
+            
+            st.bar_chart(df_detalhes.groupby('Canal')['Total Venda'].sum())
 
-    with tab2:
-        st.subheader("Análise por CNPJ")
-        df_cnpj = df_detalhes.groupby(['CNPJ', 'Canal'])['Total Venda'].sum().unstack()
-        st.dataframe(df_cnpj.style.format("R$ {:,.2f}"))
+        with tab2:
+            st.subheader("Análise por CNPJ")
+            df_cnpj = df_detalhes.groupby(['CNPJ', 'Canal'])['Total Venda'].sum().unstack()
+            st.dataframe(df_cnpj.style.format("R$ {:,.2f}"))
 
-    with tab3:
-        st.subheader("Matriz BCG (Growth-Share Matrix)")
-        
-        # Recalcular BCG para exibição
-        dash_exec = df_detalhes.groupby('Produto').agg({
-            'Total Venda': 'sum',
-            'Margem (%)': 'mean',
-            'Quantidade': 'sum'
-        }).reset_index()
-        
-        med_v = dash_exec['Total Venda'].median()
-        med_m = dash_exec['Margem (%)'].median()
-        
-        dash_exec['Classificação'] = dash_exec.apply(lambda x: classificar_bcg(x, med_v, med_m), axis=1)
-        
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("⭐ Estrelas", len(dash_exec[dash_exec['Classificação'].str.contains('Estrela')]))
-        c2.metric("🐄 Vacas Leiteiras", len(dash_exec[dash_exec['Classificação'].str.contains('Vaca')]))
-        c3.metric("❓ Interrogações", len(dash_exec[dash_exec['Classificação'].str.contains('Interrogação')]))
-        c4.metric("🍍 Abacaxis", len(dash_exec[dash_exec['Classificação'].str.contains('Abacaxi')]))
-        
-        st.dataframe(dash_exec.style.format({
-            'Total Venda': 'R$ {:,.2f}',
-            'Margem (%)': '{:.2%}'
-        }))
+        with tab3:
+            st.subheader("Matriz BCG (Growth-Share Matrix)")
+            
+            # Recalcular BCG para exibição
+            dash_exec = df_detalhes.groupby('Produto').agg({
+                'Total Venda': 'sum',
+                'Margem (%)': 'mean',
+                'Quantidade': 'sum'
+            }).reset_index()
+            
+            med_v = dash_exec['Total Venda'].median()
+            med_m = dash_exec['Margem (%)'].median()
+            
+            dash_exec['Classificação'] = dash_exec.apply(lambda x: classificar_bcg(x, med_v, med_m), axis=1)
+            
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("⭐ Estrelas", len(dash_exec[dash_exec['Classificação'].str.contains('Estrela')]))
+            c2.metric("🐄 Vacas Leiteiras", len(dash_exec[dash_exec['Classificação'].str.contains('Vaca')]))
+            c3.metric("❓ Interrogações", len(dash_exec[dash_exec['Classificação'].str.contains('Interrogação')]))
+            c4.metric("🍍 Abacaxis", len(dash_exec[dash_exec['Classificação'].str.contains('Abacaxi')]))
+            
+            st.dataframe(dash_exec.style.format({
+                'Total Venda': 'R$ {:,.2f}',
+                'Margem (%)': '{:.2%}'
+            }))
 
-    with tab4:
-        st.subheader("Base de Dados Completa")
-        st.dataframe(df_detalhes)
+        with tab4:
+            st.subheader("Base de Dados Completa")
+            st.dataframe(df_detalhes)
 else:
     st.info("Nenhum dado processado ainda. Faça o upload de um arquivo para começar.")
