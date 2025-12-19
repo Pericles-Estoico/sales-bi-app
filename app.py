@@ -284,12 +284,28 @@ with st.sidebar:
             try:
                 df_novo = st.session_state['data_novo']
                 
-                # Função segura para obter ou criar aba
+                # Função segura para obter ou criar aba (Listando todas primeiro)
                 def get_or_create_worksheet(ss, title, rows=100, cols=20):
                     try:
-                        return ss.worksheet(title)
-                    except:
-                        return ss.add_worksheet(title, rows, cols)
+                        # Listar títulos de todas as abas existentes
+                        worksheets = ss.worksheets()
+                        titles = [ws.title for ws in worksheets]
+                        
+                        if title in titles:
+                            return ss.worksheet(title)
+                        else:
+                            return ss.add_worksheet(title, rows, cols)
+                    except Exception as e:
+                        # Se falhar ao listar, tenta abrir direto (fallback)
+                        try:
+                            return ss.worksheet(title)
+                        except:
+                            # Se falhar ao abrir, tenta criar (último recurso)
+                            try:
+                                return ss.add_worksheet(title, rows, cols)
+                            except:
+                                # Se der erro que já existe, tenta abrir de novo (concorrência)
+                                return ss.worksheet(title)
 
                 # 6. Detalhes
                 sh = get_or_create_worksheet(ss, "6. Detalhes", 5000, 20)
