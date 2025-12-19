@@ -18,10 +18,10 @@ def normalizar(texto):
     texto = ''.join(c for c in texto if unicodedata.category(c) != 'Mn')
     return texto.lower().strip()
 
-def converter_bling(df, data):
+def converter_bling(df, data_str):
     d = pd.DataFrame()
-    # Forçar data correta
-    d['Data'] = data
+    # Forçar data correta em todas as linhas
+    d['Data'] = data_str
     d['Produto'] = df['Código']
     d['Quantidade'] = df['Quantidade']
     d['Total'] = df['Valor'].apply(lambda x: float(str(x).replace('R$','').replace('.','').replace(',','.').strip()))
@@ -387,7 +387,42 @@ with st.sidebar:
                         ws_detalhes.append_row(df_final.columns.tolist())
                     ws_detalhes.append_rows(novo_conteudo)
                     
-                    st.toast("✅ Dados adicionados com sucesso! Histórico preservado.", icon="🚀")
+                    # RECALCULAR DASHBOARDS COM DADOS COMPLETOS
+                    # Ler todos os dados acumulados em "6. Detalhes"
+                    dados_completos = ws_detalhes.get_all_records()
+                    if dados_completos:
+                        df_completo = pd.DataFrame(dados_completos)
+                        
+                        # Converter colunas numéricas
+                        cols_num = ['Total Venda', 'Lucro Líquido', 'Margem %']
+                        for col in cols_num:
+                            if col in df_completo.columns:
+                                df_completo[col] = pd.to_numeric(df_completo[col].astype(str).str.replace('R$', '').str.replace(',', '.'), errors='coerce').fillna(0)
+                        
+                        # 2. Análise por CNPJ
+                        ws_cnpj = get_or_create_worksheet(ss, "2. Análise por CNPJ")
+                        if 'CNPJ' in df_completo.columns:
+                            df_cnpj = df_completo.groupby('CNPJ')[['Total Venda', 'Lucro Líquido']].sum().reset_index()
+                            df_cnpj['Margem Média %'] = (df_cnpj['Lucro Líquido'] / df_cnpj['Total Venda']) * 100
+                            ws_cnpj.clear()
+                            ws_cnpj.update([df_cnpj.columns.values.tolist()] + df_cnpj.fillna(0).values.tolist())
+                        
+                        # 3. Análise Executiva
+                        ws_exec = get_or_create_worksheet(ss, "3. Análise Executiva")
+                        if 'Canal' in df_completo.columns:
+                            df_exec = df_completo.groupby('Canal')[['Total Venda', 'Lucro Líquido']].sum().reset_index()
+                            df_exec['Margem %'] = (df_exec['Lucro Líquido'] / df_exec['Total Venda']) * 100
+                            ws_exec.clear()
+                            ws_exec.update([df_exec.columns.values.tolist()] + df_exec.fillna(0).values.tolist())
+                        
+                        # 4. Preços Marketplaces
+                        ws_precos = get_or_create_worksheet(ss, "4. Preços Marketplaces")
+                        if 'Produto' in df_completo.columns and 'Canal' in df_completo.columns:
+                            df_precos = df_completo.groupby(['Produto', 'Canal'])['Total Venda'].mean().reset_index()
+                            ws_precos.clear()
+                            ws_precos.update([df_precos.columns.values.tolist()] + df_precos.fillna(0).values.tolist())
+                    
+                    st.toast("✅ Dados adicionados e dashboards atualizados!", icon="🚀")
                     st.success("✅ Envio concluído! Pode processar o próximo arquivo.")
                     
                     # Limpar estado após envio
