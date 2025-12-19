@@ -9,7 +9,7 @@ import io
 import time
 
 # ==============================================================================
-# VERSÃO V18 - FINAL E COMPLETA
+# VERSÃO V19 - FINAL E DESTRAVADA
 # CORREÇÕES ACUMULADAS:
 # 1. Autenticação restaurada
 # 2. Matriz BCG implementada (Geral e Por Canal)
@@ -19,10 +19,12 @@ import time
 # 6. Limpeza de cache forçada
 # 7. Proteção contra colunas ausentes
 # 8. Arredondamento de margem
-# 9. CORREÇÃO CRÍTICA: Aba '4. Preços Marketplaces' implementada
-# 10. CORREÇÃO CRÍTICA: Formatação de porcentagem (25,88%)
-# 11. CORREÇÃO CRÍTICA: Relatório de Produtos Faltantes (Download)
-# 12. CORREÇÃO CRÍTICA: Botões de Download dos Relatórios
+# 9. Aba '4. Preços Marketplaces' implementada
+# 10. Relatório de Produtos Faltantes (Download)
+# 11. Botões de Download dos Relatórios
+# 12. CORREÇÃO CRÍTICA: Criação automática de abas inexistentes
+# 13. CORREÇÃO CRÍTICA: Formatação de texto forçada (R$ e %) na planilha
+# 14. CORREÇÃO CRÍTICA: Leitura inteligente de valores formatados
 # ==============================================================================
 
 # ==============================================================================
@@ -52,12 +54,20 @@ COLUNAS_ESPERADAS = [
 # ==============================================================================
 def clean_currency(value):
     if pd.isna(value) or value == '': return 0.0
-    s_val = str(value).strip().replace('R$', '').replace(' ', '')
+    s_val = str(value).strip().replace('R$', '').replace(' ', '').replace('%', '')
     try: return float(s_val)
     except: pass
     if ',' in s_val and '.' in s_val: s_val = s_val.replace('.', '').replace(',', '.')
     elif ',' in s_val: s_val = s_val.replace(',', '.')
     try: return float(s_val)
+    except: return 0.0
+
+def clean_percent_read(value):
+    # Lê "25,88%" e transforma em 0.2588 para cálculo
+    if pd.isna(value) or value == '': return 0.0
+    s_val = str(value).strip().replace('%', '').replace(' ', '')
+    if ',' in s_val: s_val = s_val.replace('.', '').replace(',', '.')
+    try: return float(s_val) / 100
     except: return 0.0
 
 def clean_float(value):
@@ -124,9 +134,18 @@ def carregar_dados_detalhes():
         if header_idx == -1: return pd.DataFrame(columns=COLUNAS_ESPERADAS)
             
         df = pd.DataFrame(all_values[header_idx+1:], columns=all_values[header_idx])
-        cols_num = ['Quantidade', 'Total Venda', 'Custo Total', 'Lucro Bruto', 'Margem (%)', 'Investimento Ads']
-        for col in cols_num:
+        
+        # Conversão inteligente para cálculo
+        cols_money = ['Total Venda', 'Custo Total', 'Lucro Bruto', 'Investimento Ads', 'Custo Produto', 'Impostos', 'Comissão', 'Taxas Fixas', 'Embalagem']
+        for col in cols_money:
             if col in df.columns: df[col] = df[col].apply(clean_currency)
+            
+        if 'Margem (%)' in df.columns:
+            df['Margem (%)'] = df['Margem (%)'].apply(clean_percent_read)
+            
+        if 'Quantidade' in df.columns:
+            df['Quantidade'] = df['Quantidade'].apply(clean_float)
+            
         return df
     except: return pd.DataFrame(columns=COLUNAS_ESPERADAS)
 
@@ -343,7 +362,7 @@ except Exception as e:
     st.error(f"Erro conexão: {e}")
     st.stop()
 
-st.title("📊 Sales BI Pro - Dashboard Executivo V18")
+st.title("📊 Sales BI Pro - Dashboard Executivo V19")
 
 with st.sidebar:
     st.header("📥 Importar Vendas")
@@ -361,7 +380,7 @@ with st.sidebar:
                 df_processado, df_faltantes = processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads)
                 
                 if df_processado is not None and not df_processado.empty:
-                    # Salvar Detalhes
+                    # Salvar Detalhes (COM FORMATAÇÃO FORÇADA)
                     ws_detalhes = ss.worksheet("6. Detalhes")
                     first_row = ws_detalhes.row_values(1)
                     if not first_row or 'Total Venda' not in first_row or 'Lucro Bruto' not in first_row:
@@ -369,6 +388,12 @@ with st.sidebar:
                         ws_detalhes.append_row(COLUNAS_ESPERADAS)
                     
                     df_salvar = df_processado.copy()
+                    # Formatar para texto visual antes de salvar
+                    for c in df_salvar.columns:
+                        if 'Margem' in c: df_salvar[c] = df_salvar[c].apply(format_percent_br)
+                        elif any(x in c for x in ['Venda', 'Lucro', 'Custo', 'Preço', 'Impostos', 'Comissão', 'Taxas', 'Embalagem', 'Ads']): 
+                            df_salvar[c] = df_salvar[c].apply(format_currency_br)
+                    
                     df_salvar = df_salvar[COLUNAS_ESPERADAS]
                     ws_detalhes.append_rows(df_salvar.astype(str).values.tolist())
                     st.success(f"✅ {len(df_processado)} vendas salvas!")
@@ -381,14 +406,18 @@ with st.sidebar:
                         
                         def salvar_aba(nome, df):
                             try:
-                                ws = ss.worksheet(nome)
+                                try:
+                                    ws = ss.worksheet(nome)
+                                except:
+                                    ws = ss.add_worksheet(title=nome, rows=1000, cols=20)
+                                
                                 ws.clear()
                                 df_fmt = df.copy()
                                 for c in df_fmt.columns:
                                     if 'Margem' in c: df_fmt[c] = df_fmt[c].apply(format_percent_br)
                                     elif any(x in c for x in ['Venda', 'Lucro', 'Custo', 'Preço']): df_fmt[c] = df_fmt[c].apply(format_currency_br)
                                 ws.update([df_fmt.columns.values.tolist()] + df_fmt.astype(str).values.tolist())
-                            except: pass
+                            except Exception as e: st.error(f"Erro ao salvar aba {nome}: {e}")
 
                         if d_geral is not None: salvar_aba("1. Dashboard Geral", d_geral)
                         if d_cnpj is not None: salvar_aba("2. Análise por CNPJ", d_cnpj)
