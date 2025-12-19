@@ -429,7 +429,10 @@ with st.sidebar:
                     ws_dash = get_or_create_worksheet(ss, "1. Dashboard Geral")
                     # Verificar se precisa de cabeçalho (se a primeira linha estiver vazia)
                     vals_dash = ws_dash.get_all_values()
-                    if not vals_dash or (len(vals_dash) == 1 and not vals_dash[0][0]):
+                    # CORREÇÃO V7: Verificação robusta de lista vazia
+                    is_empty_dash = not vals_dash or (len(vals_dash) == 1 and (not vals_dash[0] or not vals_dash[0][0]))
+                    
+                    if is_empty_dash:
                         ws_dash.clear() # Limpar para garantir
                         ws_dash.append_row(df_final.columns.tolist())
                     ws_dash.append_rows(novo_conteudo)
@@ -437,7 +440,10 @@ with st.sidebar:
                     # 6. Detalhes (APPEND ONLY)
                     ws_detalhes = get_or_create_worksheet(ss, "6. Detalhes")
                     vals_det = ws_detalhes.get_all_values()
-                    if not vals_det or (len(vals_det) == 1 and not vals_det[0][0]):
+                    # CORREÇÃO V7: Verificação robusta de lista vazia
+                    is_empty_det = not vals_det or (len(vals_det) == 1 and (not vals_det[0] or not vals_det[0][0]))
+                    
+                    if is_empty_det:
                         ws_detalhes.clear()
                         ws_detalhes.append_row(df_final.columns.tolist())
                     ws_detalhes.append_rows(novo_conteudo)
