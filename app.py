@@ -6,6 +6,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import json
 import unicodedata
 import io
+import numpy as np
 
 st.set_page_config(page_title="Sales BI Pro", page_icon="📊", layout="wide")
 
@@ -18,14 +19,60 @@ def normalizar(texto):
     texto = ''.join(c for c in texto if unicodedata.category(c) != 'Mn')
     return texto.lower().strip()
 
+def limpar_valor_monetario(valor):
+    """
+    Converte valores monetários de forma inteligente.
+    Aceita: float, int, string com 'R$', string com vírgula ou ponto.
+    """
+    if pd.isna(valor) or valor == '':
+        return 0.0
+    
+    # Se já for número, retorna direto
+    if isinstance(valor, (int, float, np.number)):
+        return float(valor)
+    
+    valor_str = str(valor).strip()
+    
+    # Se for string vazia ou traço
+    if not valor_str or valor_str == '-':
+        return 0.0
+        
+    # Remover R$ e espaços
+    valor_str = valor_str.replace('R$', '').replace(' ', '')
+    
+    # Tentar converter diretamente
+    try:
+        return float(valor_str)
+    except ValueError:
+        pass
+        
+    # Lógica para formato brasileiro (1.000,00) vs americano (1,000.00)
+    if ',' in valor_str and '.' in valor_str:
+        if valor_str.find(',') > valor_str.find('.'): # 1.000,00 (BR)
+            valor_str = valor_str.replace('.', '').replace(',', '.')
+        else: # 1,000.00 (US)
+            valor_str = valor_str.replace(',', '')
+    elif ',' in valor_str: # Apenas vírgula (10,50) -> converter para ponto
+        valor_str = valor_str.replace(',', '.')
+    # Se tiver apenas ponto, assume que já é decimal (10.50)
+    
+    try:
+        return float(valor_str)
+    except ValueError:
+        return 0.0
+
 def converter_bling(df, data_str):
     d = pd.DataFrame()
     # Forçar data correta em todas as linhas
     d['Data'] = data_str
     d['Produto'] = df['Código']
-    d['Quantidade'] = df['Quantidade']
-    d['Total'] = df['Valor'].apply(lambda x: float(str(x).replace('R$','').replace('.','').replace(',','.').strip()))
-    d['Preço Unitário'] = d['Total'] / d['Quantidade']
+    d['Quantidade'] = df['Quantidade'].apply(limpar_valor_monetario)
+    
+    # Aplicar limpeza rigorosa no valor total
+    d['Total'] = df['Valor'].apply(limpar_valor_monetario)
+    
+    # Evitar divisão por zero
+    d['Preço Unitário'] = d.apply(lambda row: row['Total'] / row['Quantidade'] if row['Quantidade'] > 0 else 0, axis=1)
     return d
 
 # Conectar com Cache
@@ -79,8 +126,7 @@ def carregar_configuracoes():
                     # Limpar colunas numéricas
                     for col in df.columns:
                         if any(x in col for x in ['R$', '%', 'Peso', 'Custo', 'Preço', 'Taxa', 'Frete', 'Valor']):
-                            df[col] = df[col].apply(lambda x: str(x).replace('R$', '').replace(' ', '').replace(',', '.') if pd.notna(x) else x)
-                            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+                            df[col] = df[col].apply(limpar_valor_monetario)
                     configs_data[key] = df
             except Exception as e:
                 st.error(f"⚠️ Erro ao carregar aba '{nome}': {str(e)}")
@@ -162,6 +208,10 @@ with st.sidebar:
             # Passar data formatada corretamente
             data_str = data_venda.strftime('%Y-%m-%d')
             df_novo = converter_bling(df_orig, data_str) if 'Código' in df_orig.columns else df_orig.copy()
+            
+            # FORÇAR DATA SELECIONADA (Garantia contra data zerada)
+            df_novo['Data'] = data_str
+            
             df_novo['Canal'] = CHANNELS[canal]
             df_novo['CNPJ'] = cnpj_regime
             
@@ -371,19 +421,24 @@ with st.sidebar:
             
             if st.button("💾 Confirmar e Enviar para Google Sheets"):
                 try:
+                    # Converter para lista de listas, tratando floats para string com ponto se necessário
+                    # O gspread lida bem com floats nativos do Python
                     novo_conteudo = df_final.values.tolist()
                     
                     # 1. Dashboard Geral (APPEND ONLY)
                     ws_dash = get_or_create_worksheet(ss, "1. Dashboard Geral")
-                    # Verificar se precisa de cabeçalho
-                    if len(ws_dash.get_all_values()) < 1:
+                    # Verificar se precisa de cabeçalho (se a primeira linha estiver vazia)
+                    vals_dash = ws_dash.get_all_values()
+                    if not vals_dash or (len(vals_dash) == 1 and not vals_dash[0][0]):
+                        ws_dash.clear() # Limpar para garantir
                         ws_dash.append_row(df_final.columns.tolist())
                     ws_dash.append_rows(novo_conteudo)
                     
                     # 6. Detalhes (APPEND ONLY)
                     ws_detalhes = get_or_create_worksheet(ss, "6. Detalhes")
-                    # Verificar se precisa de cabeçalho
-                    if len(ws_detalhes.get_all_values()) < 1:
+                    vals_det = ws_detalhes.get_all_values()
+                    if not vals_det or (len(vals_det) == 1 and not vals_det[0][0]):
+                        ws_detalhes.clear()
                         ws_detalhes.append_row(df_final.columns.tolist())
                     ws_detalhes.append_rows(novo_conteudo)
                     
@@ -393,11 +448,11 @@ with st.sidebar:
                     if dados_completos:
                         df_completo = pd.DataFrame(dados_completos)
                         
-                        # Converter colunas numéricas
+                        # Converter colunas numéricas com a função robusta
                         cols_num = ['Total Venda', 'Lucro Líquido', 'Margem %']
                         for col in cols_num:
                             if col in df_completo.columns:
-                                df_completo[col] = pd.to_numeric(df_completo[col].astype(str).str.replace('R$', '').str.replace(',', '.'), errors='coerce').fillna(0)
+                                df_completo[col] = df_completo[col].apply(limpar_valor_monetario)
                         
                         # 2. Análise por CNPJ
                         ws_cnpj = get_or_create_worksheet(ss, "2. Análise por CNPJ")
