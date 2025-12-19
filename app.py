@@ -9,7 +9,7 @@ import io
 import time
 
 # ==============================================================================
-# VERSÃO V20 - FINAL E COMPLETA
+# VERSÃO V21 - CORREÇÃO DE PREÇOS E NAN
 # CORREÇÕES ACUMULADAS:
 # 1. Autenticação restaurada
 # 2. Matriz BCG implementada (Geral e Por Canal)
@@ -25,7 +25,9 @@ import time
 # 12. Criação automática de abas inexistentes
 # 13. Formatação de texto forçada (R$ e %) na planilha
 # 14. Leitura inteligente de valores formatados
-# 15. NOVO: Botão de Atualização Manual (Limpar Cache)
+# 15. Botão de Atualização Manual (Limpar Cache)
+# 16. NOVO: Tratamento de 'nan' na aba de preços (substituído por '-')
+# 17. NOVO: Formatação forçada de R$ na aba de preços
 # ==============================================================================
 
 # ==============================================================================
@@ -355,7 +357,7 @@ except Exception as e:
     st.error(f"Erro conexão: {e}")
     st.stop()
 
-st.title("📊 Sales BI Pro - Dashboard Executivo V20")
+st.title("📊 Sales BI Pro - Dashboard Executivo V21")
 
 with st.sidebar:
     st.header("📥 Importar Vendas")
@@ -412,9 +414,17 @@ with st.sidebar:
                                 
                                 ws.clear()
                                 df_fmt = df.copy()
-                                for c in df_fmt.columns:
-                                    if 'Margem' in c: df_fmt[c] = df_fmt[c].apply(format_percent_br)
-                                    elif any(x in c for x in ['Venda', 'Lucro', 'Custo', 'Preço']): df_fmt[c] = df_fmt[c].apply(format_currency_br)
+                                
+                                # Lógica específica para formatação de preços e NaN
+                                if nome == "4. Preços Marketplaces":
+                                    for col in df_fmt.columns:
+                                        if col != 'Produto': # Todas as colunas exceto Produto são preços
+                                            df_fmt[col] = df_fmt[col].apply(lambda x: format_currency_br(x) if pd.notna(x) and x != 0 else "-")
+                                else:
+                                    for c in df_fmt.columns:
+                                        if 'Margem' in c: df_fmt[c] = df_fmt[c].apply(format_percent_br)
+                                        elif any(x in c for x in ['Venda', 'Lucro', 'Custo', 'Preço']): df_fmt[c] = df_fmt[c].apply(format_currency_br)
+                                
                                 ws.update([df_fmt.columns.values.tolist()] + df_fmt.astype(str).values.tolist())
                             except Exception as e: st.error(f"Erro ao salvar aba {nome}: {e}")
 
@@ -461,7 +471,8 @@ if not df_detalhes.empty and 'Total Venda' in df_detalhes.columns:
         st.download_button("📥 Baixar BCG por Canal", data=to_excel(d_bcg), file_name="bcg_canal.xlsx")
     with tab5:
         st.subheader("Preços Médios por Marketplace")
-        st.dataframe(d_precos.style.format(lambda x: f"R$ {x:,.2f}" if isinstance(x, (int, float)) else x))
+        # Formatação visual no Streamlit
+        st.dataframe(d_precos.style.format(lambda x: f"R$ {x:,.2f}" if isinstance(x, (int, float)) and pd.notna(x) else ("-" if pd.isna(x) else x)))
         st.download_button("📥 Baixar Preços", data=to_excel(d_precos), file_name="precos_marketplaces.xlsx")
     with tab6:
         st.dataframe(df_detalhes)
