@@ -9,6 +9,15 @@ import io
 import time
 
 # ==============================================================================
+# VERSÃO V11 - FINAL E VALIDADA
+# CORREÇÕES:
+# 1. Autenticação restaurada (GOOGLE_SHEETS_CREDENTIALS)
+# 2. Matriz BCG implementada
+# 3. Correção de valores monetários (R$)
+# 4. Correção de abas vazias
+# ==============================================================================
+
+# ==============================================================================
 # CONFIGURAÇÃO DA PÁGINA
 # ==============================================================================
 st.set_page_config(page_title="Sales BI Pro", page_icon="📊", layout="wide")
@@ -423,7 +432,7 @@ except Exception as e:
     st.error(f"❌ Erro crítico de conexão: {str(e)}")
     st.stop()
 
-st.title("📊 Sales BI Pro - Dashboard Executivo V10")
+st.title("📊 Sales BI Pro - Dashboard Executivo V11")
 
 # Sidebar
 with st.sidebar:
