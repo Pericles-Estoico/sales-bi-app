@@ -9,18 +9,20 @@ import io
 import time
 
 # ==============================================================================
-# VERSÃO V17 - FINAL E REFINADA
+# VERSÃO V18 - FINAL E COMPLETA
 # CORREÇÕES ACUMULADAS:
 # 1. Autenticação restaurada
-# 2. Matriz BCG implementada
+# 2. Matriz BCG implementada (Geral e Por Canal)
 # 3. Correção de valores monetários (R$)
-# 4. Correção de abas vazias
+# 4. Correção de abas vazias e cabeçalhos
 # 5. Correção de leitura de float com vírgula (Kits)
-# 6. Correção de cabeçalho em abas vazias
-# 7. Limpeza de cache forçada
-# 8. Leitura manual de cabeçalho e reparo automático
-# 9. Proteção contra colunas ausentes nas configurações
-# 10. CORREÇÃO CRÍTICA: Arredondamento de margem (2 casas) e BCG Detalhada (Geral + Por Canal)
+# 6. Limpeza de cache forçada
+# 7. Proteção contra colunas ausentes
+# 8. Arredondamento de margem
+# 9. CORREÇÃO CRÍTICA: Aba '4. Preços Marketplaces' implementada
+# 10. CORREÇÃO CRÍTICA: Formatação de porcentagem (25,88%)
+# 11. CORREÇÃO CRÍTICA: Relatório de Produtos Faltantes (Download)
+# 12. CORREÇÃO CRÍTICA: Botões de Download dos Relatórios
 # ==============================================================================
 
 # ==============================================================================
@@ -71,6 +73,12 @@ def format_currency_br(value):
 def format_percent_br(value):
     try: return f"{value * 100:.2f}%".replace(".", ",")
     except: return "0,00%"
+
+def to_excel(df):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='Sheet1')
+    return output.getvalue()
 
 def normalizar(texto):
     if pd.isna(texto): return ''
@@ -187,7 +195,7 @@ def processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads_total):
         df_novo['Preço Unitário'] = df_novo['Total'] / df_novo['Quantidade']
     else:
         st.error("Colunas obrigatórias não encontradas: 'Código', 'Quantidade', 'Valor' (ou 'Preço').")
-        return None
+        return None, None
 
     df_novo['Canal'] = CHANNELS[canal]
     df_novo['CNPJ'] = cnpj_regime
@@ -232,6 +240,7 @@ def processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads_total):
         custo_emb = custos_ped_df['Custo Unitário (R$)'].sum()
 
     resultados = []
+    faltantes = []
     total_vendas_dia = df_novo['Total'].sum()
 
     for _, row in df_novo.iterrows():
@@ -242,15 +251,21 @@ def processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads_total):
         
         custo_produto = 0.0
         tipo = 'Produto'
+        encontrado = False
         
         if prod_norm in kits_map:
             tipo = 'Kit'
+            encontrado = True
             for comp in kits_map[prod_norm]:
                 c_norm = normalizar(comp['sku'])
                 if c_norm in produtos_map: custo_produto += produtos_map[c_norm]['custo'] * comp['qtd']
         elif prod_norm in produtos_map:
             custo_produto = produtos_map[prod_norm]['custo']
+            encontrado = True
         
+        if not encontrado:
+            faltantes.append({'Código': prod_cod, 'Tipo': 'Não Cadastrado'})
+
         custo_total_prod = custo_produto * qtd
         imposto_val = total_venda * aliquota
         comissao_val = total_venda * taxa_mp
@@ -261,9 +276,6 @@ def processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads_total):
         lucro = total_venda - custo_total_geral
         margem = (lucro / total_venda) if total_venda > 0 else 0.0
         
-        # CORREÇÃO V17: Arredondamento de Margem para 4 casas (ex: 0.3794) para ficar bonito na planilha
-        margem = round(margem, 4)
-
         resultados.append({
             'Data': row['Data'], 'Canal': row['Canal'], 'CNPJ': row['CNPJ'],
             'Produto': prod_cod, 'Tipo': tipo, 'Quantidade': qtd, 'Total Venda': total_venda,
@@ -272,13 +284,13 @@ def processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads_total):
             'Custo Total': custo_total_geral, 'Lucro Bruto': lucro, 'Margem (%)': margem
         })
         
-    return pd.DataFrame(resultados)
+    return pd.DataFrame(resultados), pd.DataFrame(faltantes)
 
 def atualizar_dashboards_resumo(df_detalhes):
-    if df_detalhes.empty: return None, None, None, None
+    if df_detalhes.empty: return None, None, None, None, None
     
     cols_req = ['Canal', 'Total Venda', 'Lucro Bruto', 'Quantidade', 'Margem (%)', 'CNPJ', 'Produto']
-    if not all(c in df_detalhes.columns for c in cols_req): return None, None, None, None
+    if not all(c in df_detalhes.columns for c in cols_req): return None, None, None, None, None
 
     dash_geral = df_detalhes.groupby('Canal').agg({
         'Total Venda': 'sum', 'Lucro Bruto': 'sum', 'Quantidade': 'sum', 'Margem (%)': 'mean'
@@ -288,20 +300,18 @@ def atualizar_dashboards_resumo(df_detalhes):
         'Total Venda': 'sum', 'Lucro Bruto': 'sum', 'Margem (%)': 'mean'
     }).reset_index()
     
-    # BCG GERAL (Todos os canais)
+    # BCG GERAL
     dash_exec = df_detalhes.groupby('Produto').agg({
         'Quantidade': 'sum', 'Total Venda': 'sum', 'Lucro Bruto': 'sum', 'Margem (%)': 'mean'
     }).reset_index()
-    
     med_v = dash_exec['Total Venda'].median()
     med_m = dash_exec['Margem (%)'].median()
     dash_exec['Classificação BCG'] = dash_exec.apply(lambda x: classificar_bcg(x, med_v, med_m), axis=1)
     
-    # BCG POR CANAL (Detalhado)
+    # BCG POR CANAL
     dash_bcg_canal = df_detalhes.groupby(['Canal', 'Produto']).agg({
         'Total Venda': 'sum', 'Margem (%)': 'mean', 'Quantidade': 'sum'
     }).reset_index()
-    
     bcg_final = []
     for canal in dash_bcg_canal['Canal'].unique():
         subset = dash_bcg_canal[dash_bcg_canal['Canal'] == canal].copy()
@@ -311,7 +321,14 @@ def atualizar_dashboards_resumo(df_detalhes):
         bcg_final.append(subset)
     df_bcg_final = pd.concat(bcg_final) if bcg_final else pd.DataFrame()
 
-    return dash_geral, dash_cnpj, dash_exec, df_bcg_final
+    # PREÇOS MARKETPLACES (Aba 4)
+    df_precos = df_detalhes.groupby(['Produto', 'Canal']).agg({
+        'Total Venda': 'sum', 'Quantidade': 'sum'
+    }).reset_index()
+    df_precos['Preço Médio'] = df_precos['Total Venda'] / df_precos['Quantidade']
+    df_precos_pivot = df_precos.pivot(index='Produto', columns='Canal', values='Preço Médio').reset_index()
+
+    return dash_geral, dash_cnpj, dash_exec, df_bcg_final, df_precos_pivot
 
 # ==============================================================================
 # INTERFACE
@@ -326,7 +343,7 @@ except Exception as e:
     st.error(f"Erro conexão: {e}")
     st.stop()
 
-st.title("📊 Sales BI Pro - Dashboard Executivo V17")
+st.title("📊 Sales BI Pro - Dashboard Executivo V18")
 
 with st.sidebar:
     st.header("📥 Importar Vendas")
@@ -341,9 +358,10 @@ with st.sidebar:
         with st.spinner("Processando..."):
             try:
                 df_orig = pd.read_excel(uploaded_file)
-                df_processado = processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads)
+                df_processado, df_faltantes = processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads)
                 
                 if df_processado is not None and not df_processado.empty:
+                    # Salvar Detalhes
                     ws_detalhes = ss.worksheet("6. Detalhes")
                     first_row = ws_detalhes.row_values(1)
                     if not first_row or 'Total Venda' not in first_row or 'Lucro Bruto' not in first_row:
@@ -355,10 +373,12 @@ with st.sidebar:
                     ws_detalhes.append_rows(df_salvar.astype(str).values.tolist())
                     st.success(f"✅ {len(df_processado)} vendas salvas!")
                     
+                    # Atualizar Dashboards
                     carregar_dados_detalhes.clear()
                     df_historico = carregar_dados_detalhes()
                     if not df_historico.empty:
-                        d_geral, d_cnpj, d_exec, d_bcg = atualizar_dashboards_resumo(df_historico)
+                        d_geral, d_cnpj, d_exec, d_bcg, d_precos = atualizar_dashboards_resumo(df_historico)
+                        
                         def salvar_aba(nome, df):
                             try:
                                 ws = ss.worksheet(nome)
@@ -366,57 +386,59 @@ with st.sidebar:
                                 df_fmt = df.copy()
                                 for c in df_fmt.columns:
                                     if 'Margem' in c: df_fmt[c] = df_fmt[c].apply(format_percent_br)
-                                    elif any(x in c for x in ['Venda', 'Lucro', 'Custo']): df_fmt[c] = df_fmt[c].apply(format_currency_br)
+                                    elif any(x in c for x in ['Venda', 'Lucro', 'Custo', 'Preço']): df_fmt[c] = df_fmt[c].apply(format_currency_br)
                                 ws.update([df_fmt.columns.values.tolist()] + df_fmt.astype(str).values.tolist())
                             except: pass
 
                         if d_geral is not None: salvar_aba("1. Dashboard Geral", d_geral)
                         if d_cnpj is not None: salvar_aba("2. Análise por CNPJ", d_cnpj)
-                        if d_exec is not None: salvar_aba("3. Análise Executiva", d_exec) # BCG Geral
-                        if d_bcg is not None: salvar_aba("5. Matriz BCG", d_bcg) # BCG por Canal
+                        if d_exec is not None: salvar_aba("3. Análise Executiva", d_exec)
+                        if d_precos is not None: salvar_aba("4. Preços Marketplaces", d_precos)
+                        if d_bcg is not None: salvar_aba("5. Matriz BCG", d_bcg)
+                        
                         st.success("Dashboards atualizados!")
+                        
+                        # Alerta de Faltantes
+                        if not df_faltantes.empty:
+                            st.warning(f"⚠️ {len(df_faltantes)} produtos não encontrados no cadastro!")
+                            st.download_button("📥 Baixar Lista de Faltantes", 
+                                               data=to_excel(df_faltantes), 
+                                               file_name="produtos_faltantes.xlsx")
+                        
                         time.sleep(1)
                         st.rerun()
                     else: st.warning("Dados salvos, mas histórico parece vazio.")
             except Exception as e: st.error(f"Erro: {e}")
 
 st.divider()
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 Visão Geral", "🏢 Por CNPJ", "⭐ BCG Geral", "🎯 BCG por Canal", "📋 Detalhes"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📈 Visão Geral", "🏢 Por CNPJ", "⭐ BCG Geral", "🎯 BCG por Canal", "💲 Preços", "📋 Detalhes"])
 df_detalhes = carregar_dados_detalhes()
 
 if not df_detalhes.empty and 'Total Venda' in df_detalhes.columns:
-    # Recalcular BCGs para visualização
-    dash_exec = df_detalhes.groupby('Produto').agg({
-        'Quantidade': 'sum', 'Total Venda': 'sum', 'Lucro Bruto': 'sum', 'Margem (%)': 'mean'
-    }).reset_index()
-    med_v = dash_exec['Total Venda'].median()
-    med_m = dash_exec['Margem (%)'].median()
-    dash_exec['Classificação'] = dash_exec.apply(lambda x: classificar_bcg(x, med_v, med_m), axis=1)
-
-    dash_bcg_canal = df_detalhes.groupby(['Canal', 'Produto']).agg({
-        'Total Venda': 'sum', 'Margem (%)': 'mean', 'Quantidade': 'sum'
-    }).reset_index()
-    bcg_final = []
-    for canal in dash_bcg_canal['Canal'].unique():
-        subset = dash_bcg_canal[dash_bcg_canal['Canal'] == canal].copy()
-        med_v_c = subset['Total Venda'].median()
-        med_m_c = subset['Margem (%)'].median()
-        subset['Classificação'] = subset.apply(lambda x: classificar_bcg(x, med_v_c, med_m_c), axis=1)
-        bcg_final.append(subset)
-    df_bcg_final = pd.concat(bcg_final) if bcg_final else pd.DataFrame()
+    # Recalcular para visualização
+    d_geral, d_cnpj, d_exec, d_bcg, d_precos = atualizar_dashboards_resumo(df_detalhes)
 
     with tab1:
         st.metric("Vendas Totais", format_currency_br(df_detalhes['Total Venda'].sum()))
         st.bar_chart(df_detalhes.groupby('Canal')['Total Venda'].sum())
+        st.download_button("📥 Baixar Resumo Geral", data=to_excel(d_geral), file_name="resumo_geral.xlsx")
     with tab2:
-        st.dataframe(df_detalhes.groupby(['CNPJ', 'Canal'])['Total Venda'].sum().unstack().style.format("R$ {:,.2f}"))
+        st.dataframe(d_cnpj.style.format({'Total Venda': 'R$ {:,.2f}', 'Margem (%)': '{:.2%}'}))
+        st.download_button("📥 Baixar Análise CNPJ", data=to_excel(d_cnpj), file_name="analise_cnpj.xlsx")
     with tab3:
-        st.subheader("Matriz BCG Geral (Todos os Canais)")
-        st.dataframe(dash_exec.style.format({'Total Venda': 'R$ {:,.2f}', 'Margem (%)': '{:.2%}'}))
+        st.subheader("Matriz BCG Geral")
+        st.dataframe(d_exec.style.format({'Total Venda': 'R$ {:,.2f}', 'Margem (%)': '{:.2%}'}))
+        st.download_button("📥 Baixar BCG Geral", data=to_excel(d_exec), file_name="bcg_geral.xlsx")
     with tab4:
         st.subheader("Matriz BCG por Canal")
-        st.dataframe(df_bcg_final.style.format({'Total Venda': 'R$ {:,.2f}', 'Margem (%)': '{:.2%}'}))
+        st.dataframe(d_bcg.style.format({'Total Venda': 'R$ {:,.2f}', 'Margem (%)': '{:.2%}'}))
+        st.download_button("📥 Baixar BCG por Canal", data=to_excel(d_bcg), file_name="bcg_canal.xlsx")
     with tab5:
+        st.subheader("Preços Médios por Marketplace")
+        st.dataframe(d_precos.style.format(lambda x: f"R$ {x:,.2f}" if isinstance(x, (int, float)) else x))
+        st.download_button("📥 Baixar Preços", data=to_excel(d_precos), file_name="precos_marketplaces.xlsx")
+    with tab6:
         st.dataframe(df_detalhes)
+        st.download_button("📥 Baixar Detalhes Completos", data=to_excel(df_detalhes), file_name="detalhes_vendas.xlsx")
 else:
     st.info("Aguardando dados...")
