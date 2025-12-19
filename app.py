@@ -284,8 +284,17 @@ with st.sidebar:
             try:
                 df_novo = st.session_state['data_novo']
                 
+                # Função segura para obter ou criar aba
+                def get_or_create_worksheet(ss, title, rows=100, cols=20):
+                    try:
+                        return ss.worksheet(title)
+                    except:
+                        return ss.add_worksheet(title, rows, cols)
+
+                # 6. Detalhes
+                sh = get_or_create_worksheet(ss, "6. Detalhes", 5000, 20)
+                
                 try:
-                    sh = ss.worksheet("6. Detalhes")
                     ex = sh.get_all_values()
                     df_ex = pd.DataFrame(ex[1:], columns=ex[0]) if len(ex) > 1 else pd.DataFrame()
                     for c in ['Quantidade','Total','Custo_Total','Margem_Bruta','Lucro_Liquido','Impostos']:
@@ -293,11 +302,22 @@ with st.sidebar:
                             df_ex[c] = pd.to_numeric(df_ex[c], errors='coerce')
                 except:
                     df_ex = pd.DataFrame()
-                
-                try:
-                    sh = ss.worksheet("6. Detalhes")
-                except:
-                    sh = ss.add_worksheet("6. Detalhes", 5000, 20)
+
+                # Forçar atualização do cabeçalho se as colunas mudaram
+                if not df_ex.empty and 'Ads_Campanhas' not in df_ex.columns and 'Ads_Campanhas' in df_novo.columns:
+                    sh.clear()
+                    df_ex['Ads_Campanhas'] = 0
+                    df_full = pd.concat([df_ex, df_novo], ignore_index=True)
+                    dados_finais = [df_full.columns.tolist()] + df_full.astype(str).values.tolist()
+                    sh.update('A1', dados_finais)
+                else:
+                    if df_ex.empty:
+                        sh.clear()
+                        dados_finais = [df_novo.columns.tolist()] + df_novo.astype(str).values.tolist()
+                        sh.update('A1', dados_finais)
+                    else:
+                        novas_linhas = df_novo.astype(str).values.tolist()
+                        sh.append_rows(novas_linhas)
                 
                 df_full = pd.concat([df_ex, df_novo], ignore_index=True) if not df_ex.empty else df_novo
                 df_full = df_full.fillna(0)  # Substituir NaN por 0 para evitar erro JSON
@@ -321,10 +341,7 @@ with st.sidebar:
                 
                 prods['BCG'] = prods.apply(bcg, axis=1)
                 
-                try:
-                    sh1 = ss.worksheet("1. Dashboard Geral")
-                except:
-                    sh1 = ss.add_worksheet("1. Dashboard Geral", 100, 5)
+                sh1 = get_or_create_worksheet(ss, "1. Dashboard Geral", 100, 5)
                 
                 dias = len(df_full['Data'].unique()) if 'Data' in df_full.columns else 1
                 lucro = prods['Lucro_Liquido'].sum()
@@ -351,10 +368,7 @@ with st.sidebar:
                 sh1.update('A1', d1)
                 
                 if 'CNPJ' in df_full.columns:
-                    try:
-                        sh_cnpj = ss.worksheet("2. Por CNPJ")
-                    except:
-                        sh_cnpj = ss.add_worksheet("2. Por CNPJ", 100, 8)
+                    sh_cnpj = get_or_create_worksheet(ss, "2. Por CNPJ", 100, 8)
                     
                     cnpj_agg = df_full.groupby('CNPJ').agg({
                         'Total': 'sum', 'Custo_Total': 'sum', 'Margem_Bruta': 'sum',
@@ -374,10 +388,7 @@ with st.sidebar:
                     sh_cnpj.clear()
                     sh_cnpj.update('A1', d_cnpj)
                 
-                try:
-                    sh_exec = ss.worksheet("3. Análise Executiva")
-                except:
-                    sh_exec = ss.add_worksheet("3. Análise Executiva", 200, 6)
+                sh_exec = get_or_create_worksheet(ss, "3. Análise Executiva", 200, 6)
                 
                 margem_media = (lucro / total * 100) if total > 0 else 0
                 produtos_prejuizo = len(prods[prods['Lucro_Liquido'] <= 0])
