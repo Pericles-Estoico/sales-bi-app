@@ -9,12 +9,13 @@ import io
 import time
 
 # ==============================================================================
-# VERSÃO V11 - FINAL E VALIDADA
+# VERSÃO V12 - FINAL E ROBUSTA
 # CORREÇÕES:
 # 1. Autenticação restaurada (GOOGLE_SHEETS_CREDENTIALS)
 # 2. Matriz BCG implementada
 # 3. Correção de valores monetários (R$)
 # 4. Correção de abas vazias
+# 5. CORREÇÃO CRÍTICA: Leitura de quantidades de Kits com vírgula (ex: 1,1)
 # ==============================================================================
 
 # ==============================================================================
@@ -52,10 +53,6 @@ def clean_currency(value):
     # Se já for um número float/int puro
     try:
         f_val = float(s_val)
-        # Lógica heurística: se o valor for muito alto (ex: 375.00) onde deveria ser 3.75
-        # Mas cuidado: produtos caros existem. 
-        # Melhor abordagem: assumir que o input do Excel está correto se for numérico.
-        # O problema geralmente vem de strings com vírgula sendo lidas erradas.
         return f_val
     except:
         pass
@@ -67,6 +64,16 @@ def clean_currency(value):
     elif ',' in s_val:
         s_val = s_val.replace(',', '.')
     
+    try:
+        return float(s_val)
+    except:
+        return 0.0
+
+def clean_float(value):
+    """Converte string com vírgula para float de forma segura (para quantidades)"""
+    if pd.isna(value) or value == '':
+        return 0.0
+    s_val = str(value).strip().replace(',', '.')
     try:
         return float(s_val)
     except:
@@ -271,9 +278,13 @@ def processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads_total):
                 skus = comps_str.split(';')
                 qtds = qtds_str.split(';') if ';' in qtds_str else [1]*len(skus)
                 for s, q in zip(skus, qtds):
-                    componentes.append({'sku': s.strip(), 'qtd': float(q) if q else 1})
+                    # CORREÇÃO AQUI: clean_float em vez de float direto
+                    qtd_val = clean_float(q) if q else 1.0
+                    componentes.append({'sku': s.strip(), 'qtd': qtd_val})
             else:
-                componentes.append({'sku': comps_str.strip(), 'qtd': float(qtds_str) if qtds_str else 1})
+                # CORREÇÃO AQUI: clean_float em vez de float direto
+                qtd_val = clean_float(qtds_str) if qtds_str else 1.0
+                componentes.append({'sku': comps_str.strip(), 'qtd': qtd_val})
             
             kits_map[normalizar(cod_kit)] = componentes
 
@@ -432,7 +443,7 @@ except Exception as e:
     st.error(f"❌ Erro crítico de conexão: {str(e)}")
     st.stop()
 
-st.title("📊 Sales BI Pro - Dashboard Executivo V11")
+st.title("📊 Sales BI Pro - Dashboard Executivo V12")
 
 # Sidebar
 with st.sidebar:
