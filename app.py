@@ -1,524 +1,445 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-import json
-import unicodedata
-import io
-import numpy as np
+from google.oauth2.service_account import Credentials
+from datetime import datetime
+import time
 
+# Configuração da Página
 st.set_page_config(page_title="Sales BI Pro", page_icon="📊", layout="wide")
 
-CHANNELS = {'geral': '📊 Vendas Gerais', 'mercado_livre': '🛒 Mercado Livre', 'shopee_matriz': '🛍️ Shopee Matriz', 'shopee_150': '🏪 Shopee 1:50', 'shein': '👗 Shein'}
+# Estilo CSS Personalizado
+st.markdown("""
+    <style>
+    .main {
+        background-color: #f5f5f5;
+    }
+    .stButton>button {
+        width: 100%;
+        background-color: #4CAF50;
+        color: white;
+        font-weight: bold;
+    }
+    .stButton>button:hover {
+        background-color: #45a049;
+    }
+    .metric-card {
+        background-color: white;
+        padding: 20px;
+        border-radius: 10px;
+        box_shadow: 0 4px 6px rgba(0,0,0,0.1);
+        text-align: center;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
-def normalizar(texto):
-    if pd.isna(texto): return ''
-    texto = str(texto)
-    texto = unicodedata.normalize('NFD', texto)
-    texto = ''.join(c for c in texto if unicodedata.category(c) != 'Mn')
-    return texto.lower().strip()
-
-def limpar_valor_monetario(valor):
-    """
-    Converte valores monetários de forma inteligente.
-    Aceita: float, int, string com 'R$', string com vírgula ou ponto.
-    """
-    if pd.isna(valor) or valor == '':
-        return 0.0
-    
-    # Se já for número, retorna direto
-    if isinstance(valor, (int, float, np.number)):
-        return float(valor)
-    
-    valor_str = str(valor).strip()
-    
-    # Se for string vazia ou traço
-    if not valor_str or valor_str == '-':
-        return 0.0
-        
-    # Remover R$ e espaços
-    valor_str = valor_str.replace('R$', '').replace(' ', '')
-    
-    # Tentar converter diretamente
-    try:
-        return float(valor_str)
-    except ValueError:
-        pass
-        
-    # Lógica para formato brasileiro (1.000,00) vs americano (1,000.00)
-    if ',' in valor_str and '.' in valor_str:
-        if valor_str.find(',') > valor_str.find('.'): # 1.000,00 (BR)
-            valor_str = valor_str.replace('.', '').replace(',', '.')
-        else: # 1,000.00 (US)
-            valor_str = valor_str.replace(',', '')
-    elif ',' in valor_str: # Apenas vírgula (10,50) -> converter para ponto
-        valor_str = valor_str.replace(',', '.')
-    # Se tiver apenas ponto, assume que já é decimal (10.50)
-    
-    try:
-        return float(valor_str)
-    except ValueError:
-        return 0.0
-
-def formatar_moeda_br(valor):
-    """Formata float para string R$ 1.234,56"""
-    try:
-        return f"R$ {float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except:
-        return valor
-
-def formatar_porcentagem_br(valor):
-    """Formata float para string 12,34%"""
-    try:
-        return f"{float(valor):.2f}%".replace(".", ",")
-    except:
-        return valor
-
-def converter_bling(df, data_str):
-    d = pd.DataFrame()
-    # Forçar data correta em todas as linhas
-    d['Data'] = data_str
-    d['Produto'] = df['Código']
-    d['Quantidade'] = df['Quantidade'].apply(limpar_valor_monetario)
-    
-    # Aplicar limpeza rigorosa no valor total
-    d['Total'] = df['Valor'].apply(limpar_valor_monetario)
-    
-    # Evitar divisão por zero
-    d['Preço Unitário'] = d.apply(lambda row: row['Total'] / row['Quantidade'] if row['Quantidade'] > 0 else 0, axis=1)
-    return d
-
-# Conectar com Cache
-@st.cache_resource
-def conectar_google_sheets():
-    scope = ['https://spreadsheets.google.com/feeds','https://www.googleapis.com/auth/drive']
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(st.secrets["GOOGLE_SHEETS_CREDENTIALS"]), scope)
-    gc = gspread.authorize(creds)
-    ss = gc.open_by_url(st.secrets["GOOGLE_SHEETS_URL"])
-    return ss, gc
-
-@st.cache_data(ttl=3600)  # Cache por 1 hora
-def carregar_configuracoes():
-    try:
-        ss, gc = conectar_google_sheets()
-        configs_data = {}
-        
-        # Carregar Estoque
-        estoque_produtos = set()
-        if "TEMPLATE_ESTOQUE_URL" in st.secrets:
-            try:
-                ss_estoque = gc.open_by_url(st.secrets["TEMPLATE_ESTOQUE_URL"])
-                ws_estoque = ss_estoque.worksheet('template_estoque')
-                df_estoque = pd.DataFrame(ws_estoque.get_all_records())
-                if 'codigo' in df_estoque.columns:
-                    estoque_produtos = set(df_estoque['codigo'].tolist())
-            except: pass
-        
-        # Carregar Abas de Configuração
-        for nome, key in [("Produtos", "produtos"), ("Kits", "kits"), ("Canais", "canais"), 
-                          ("Custos por Pedido", "custos_ped"), ("Impostos", "impostos"), ("Frete", "frete"), ("Metas", "metas")]:
-            try:
-                sh = ss.worksheet(nome)
-                data = sh.get_all_values()
-                if len(data) > 1:
-                    # Tratar colunas duplicadas
-                    cols = data[0]
-                    seen = {}
-                    new_cols = []
-                    for c in cols:
-                        c = c.strip()
-                        if c in seen:
-                            seen[c] += 1
-                            new_cols.append(f"{c}_{seen[c]}")
-                        else:
-                            seen[c] = 0
-                            new_cols.append(c)
-                    
-                    df = pd.DataFrame(data[1:], columns=new_cols)
-                    
-                    # Limpar colunas numéricas
-                    for col in df.columns:
-                        if any(x in col for x in ['R$', '%', 'Peso', 'Custo', 'Preço', 'Taxa', 'Frete', 'Valor']):
-                            df[col] = df[col].apply(limpar_valor_monetario)
-                    configs_data[key] = df
-            except Exception as e:
-                st.error(f"⚠️ Erro ao carregar aba '{nome}': {str(e)}")
-            
-        return configs_data, estoque_produtos
-    except Exception as e:
-        st.error(f"❌ Erro geral ao carregar configurações: {str(e)}")
-        return None, None
-
-def get_or_create_worksheet(ss, title, rows=1000, cols=20):
-    try:
-        return ss.worksheet(title)
-    except gspread.WorksheetNotFound:
-        return ss.add_worksheet(title, rows, cols)
-
-configs = {}
-ss = None
-estoque_produtos = set()
-
-# Botão para limpar cache
-with st.sidebar:
-    if st.button("🔄 Recarregar Configurações (Limpar Cache)"):
-        st.cache_data.clear()
-        st.rerun()
-
-try:
-    ss, gc = conectar_google_sheets()
-    configs, estoque_produtos = carregar_configuracoes()
-    
-    if configs:
-        for key, df in configs.items():
-            st.session_state[key] = df
-        st.session_state['estoque_produtos'] = estoque_produtos
-    else:
-        st.error("❌ Erro ao carregar configurações. Verifique a conexão.")
-        
-except Exception as e:
-    st.error(f"❌ Erro conexão: {str(e)}")
-
+# Título Principal
 st.title("📊 Sales BI Pro - Dashboard Executivo")
 
-if configs:
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Produtos", len(configs.get('produtos', [])))
-        st.metric("Kits", len(configs.get('kits', [])))
-    with col2:
-        st.metric("Canais", len(configs.get('canais', [])))
-    with col3:
-        if 'metas' in configs and not configs['metas'].empty:
-            st.metric("Margem Meta", configs['metas'].iloc[0]['Valor'])
-    with col4:
-        if 'custos_ped' in configs and not configs['custos_ped'].empty:
-            custo_emb = configs['custos_ped']['Custo Unitário (R$)'].sum()
-            st.metric("Custo Embalagem", f"R$ {custo_emb:.2f}")
+# --- CONFIGURAÇÃO DO GOOGLE SHEETS ---
+SCOPE = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+]
 
-with st.sidebar:
-    st.header("🎲 Controles")
-    modo_teste = st.checkbox("🧪 Modo Teste (simulação)", value=False)
-    if modo_teste:
-        st.warning("⚠️ Simulação ativa - dados NÃO serão salvos")
+@st.cache_resource
+def connect_google_sheets():
+    try:
+        creds = Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"],
+            scopes=SCOPE
+        )
+        client = gspread.authorize(creds)
+        # Tenta abrir a planilha
+        sheet = client.open_by_key(st.secrets["google_sheets"]["spreadsheet_id"])
+        return sheet
+    except Exception as e:
+        st.error(f"Erro ao conectar no Google Sheets: {e}")
+        return None
+
+# --- FUNÇÕES AUXILIARES ---
+
+def clean_currency(value):
+    """
+    Converte valores monetários/numéricos de forma robusta.
+    Aceita: float, int, string ('R$ 1.200,50', '1.200,50', '1200.50')
+    Retorna: float
+    """
+    if isinstance(value, (int, float)):
+        return float(value)
     
-    st.divider()
-    st.header("📤 Vendas")
-    formato = st.radio("Formato", ['Bling', 'Padrão'])
-    canal = st.selectbox("Canal", list(CHANNELS.keys()), format_func=lambda x: CHANNELS[x])
-    cnpj_regime = st.selectbox("CNPJ/Regime", ['Simples Nacional', 'Lucro Presumido', 'Lucro Real'])
-    if formato == 'Bling':
-        data_venda = st.date_input("Data", datetime.now())
+    if pd.isna(value) or value == "":
+        return 0.0
+        
+    str_val = str(value).strip()
     
-    # Novo campo para Ads/Campanhas
-    custo_ads = st.number_input("💰 Investimento em Ads/Campanhas do Dia (R$)", min_value=0.0, value=0.0, step=10.0)
+    # Remove símbolos de moeda e espaços
+    str_val = str_val.replace("R$", "").replace("US$", "").strip()
     
-    uploaded_file = st.file_uploader("Excel", type=['xlsx'])
+    # Tenta detectar formato brasileiro (ponto como milhar, vírgula como decimal)
+    if "," in str_val and "." in str_val:
+        # Ex: 1.234,56 -> Remove ponto, troca vírgula por ponto
+        if str_val.find(".") < str_val.find(","):
+             str_val = str_val.replace(".", "").replace(",", ".")
+        # Ex: 1,234.56 (formato americano misturado) -> Remove vírgula
+        else:
+             str_val = str_val.replace(",", "")
+    elif "," in str_val:
+        # Ex: 1234,56 -> Troca vírgula por ponto
+        str_val = str_val.replace(",", ".")
     
-    if uploaded_file and st.button("🔄 Processar"):
+    try:
+        return float(str_val)
+    except ValueError:
+        return 0.0
+
+def clean_percentage(value):
+    if isinstance(value, (int, float)):
+        return float(value)
+    if pd.isna(value) or value == "":
+        return 0.0
+    str_val = str(value).replace("%", "").replace(",", ".").strip()
+    try:
+        return float(str_val) / 100
+    except:
+        return 0.0
+
+def load_config_data(sheet, tab_name, expected_cols):
+    try:
+        worksheet = sheet.worksheet(tab_name)
+        data = worksheet.get_all_records()
+        df = pd.DataFrame(data)
+        
+        # Tratamento de colunas duplicadas ou vazias
+        df.columns = [c.strip() for c in df.columns]
+        
+        # Se faltar coluna esperada, cria vazia
+        for col in expected_cols:
+            if col not in df.columns:
+                # Tenta achar coluna parecida (case insensitive)
+                found = False
+                for existing_col in df.columns:
+                    if existing_col.lower() == col.lower():
+                        df.rename(columns={existing_col: col}, inplace=True)
+                        found = True
+                        break
+                if not found:
+                    df[col] = None
+                    
+        return df
+    except gspread.exceptions.WorksheetNotFound:
+        st.error(f"Aba '{tab_name}' não encontrada na planilha.")
+        return pd.DataFrame(columns=expected_cols)
+    except Exception as e:
+        st.error(f"Erro ao ler aba '{tab_name}': {e}")
+        return pd.DataFrame(columns=expected_cols)
+
+def get_kit_cost(kit_sku, kits_df, products_df):
+    """Calcula o custo de um kit somando os componentes"""
+    try:
+        kit_row = kits_df[kits_df['Código Kit'].astype(str) == str(kit_sku)]
+        if kit_row.empty:
+            return 0.0
+        
+        components_str = str(kit_row.iloc[0]['SKUs Componentes'])
+        quantities_str = str(kit_row.iloc[0]['Qtd Componentes'])
+        
+        # Separa por ponto e vírgula
+        components = [c.strip() for c in components_str.split(';') if c.strip()]
+        
+        # Tenta separar quantidades, se falhar assume 1 para tudo
         try:
-            df_orig = pd.read_excel(uploaded_file)
-            # Passar data formatada corretamente
-            data_str = data_venda.strftime('%Y-%m-%d')
-            df_novo = converter_bling(df_orig, data_str) if 'Código' in df_orig.columns else df_orig.copy()
+            quantities = [float(q.strip().replace(',', '.')) for q in quantities_str.split(';') if q.strip()]
+        except:
+            quantities = [1.0] * len(components)
             
-            # FORÇAR DATA SELECIONADA (Garantia contra data zerada)
-            df_novo['Data'] = data_str
+        # Garante que listas tenham mesmo tamanho
+        if len(quantities) < len(components):
+            quantities.extend([1.0] * (len(components) - len(quantities)))
             
-            df_novo['Canal'] = CHANNELS[canal]
-            df_novo['CNPJ'] = cnpj_regime
-            
-            # Normalizar e mapear produtos
-            produtos_venda_orig = df_novo['Produto'].unique().tolist()
-            produtos_venda_norm = {normalizar(p): p for p in produtos_venda_orig}
-            
-            produtos_config_norm = {}
-            kits_config_norm = {}
-            estoque_norm = {}
-            
-            estoque_produtos = st.session_state.get('estoque_produtos', set())
-            if estoque_produtos:
-                estoque_norm = {normalizar(p): p for p in estoque_produtos}
-            
-            if 'produtos' in st.session_state:
-                for p in st.session_state['produtos']['Código'].tolist():
-                    produtos_config_norm[normalizar(p)] = p
-            if 'kits' in st.session_state:
-                for k in st.session_state['kits']['Código Kit'].tolist():
-                    kits_config_norm[normalizar(k)] = k
-            
-            todos_config_norm = {**produtos_config_norm, **kits_config_norm}
-            
-            mapeamento = {}
-            for norm, orig in produtos_venda_norm.items():
-                if norm in todos_config_norm:
-                    mapeamento[orig] = todos_config_norm[norm]
-                elif norm in estoque_norm:
-                    mapeamento[orig] = estoque_norm[norm]
-            
-            df_novo['Produto'] = df_novo['Produto'].apply(lambda x: mapeamento.get(x, x))
-            
-            produtos_venda = set(df_novo['Produto'].unique())
-            todos_config = set(produtos_config_norm.values()).union(set(kits_config_norm.values()))
-            
-            tem_erro = False
-            estoque_set = set(estoque_norm.values()) if estoque_norm else set()
-            
-            if estoque_set:
-                nao_existe_estoque = produtos_venda - estoque_set - set(kits_config_norm.values())
-                if nao_existe_estoque:
-                    tem_erro = True
-                    st.error(f"❌ {len(nao_existe_estoque)} produto(s) NÃO EXISTEM no estoque!")
-                    df_nao = pd.DataFrame({'Código': list(nao_existe_estoque)})
-                    buf = io.BytesIO()
-                    df_nao.to_excel(buf, index=False)
-                    st.download_button("📥 Baixar para cadastrar no ESTOQUE", buf.getvalue(), "produtos_estoque.xlsx")
-            
-            produtos_sem_custo = produtos_venda - todos_config
-            if estoque_set:
-                produtos_sem_custo = produtos_sem_custo.intersection(estoque_set)
-            
-            if produtos_sem_custo:
-                tem_erro = True
-                st.error(f"❌ {len(produtos_sem_custo)} produto(s) SEM CUSTO!")
-                df_sem = pd.DataFrame({'Código': list(produtos_sem_custo), 'Custo (R$)': 0, 'Preço Venda (R$)': 0, 'Peso (g)': 0})
-                buf2 = io.BytesIO()
-                df_sem.to_excel(buf2, index=False)
-                st.download_button("📥 Baixar para adicionar CUSTO", buf2.getvalue(), "produtos_custo.xlsx")
-            
-            if tem_erro:
-                st.stop()
-            
-            # Calcular custos
-            produtos_df = st.session_state.get('produtos', pd.DataFrame())
-            kits_df = st.session_state.get('kits', pd.DataFrame())
-            impostos_df = st.session_state.get('impostos', pd.DataFrame())
-            canais_df = st.session_state.get('canais', pd.DataFrame())
-            custos_ped_df = st.session_state.get('custos_ped', pd.DataFrame())
-            
-            aliquota = 0.06
-            if not impostos_df.empty and 'Tipo' in impostos_df.columns:
-                imp = impostos_df[impostos_df['Tipo'].str.contains(cnpj_regime.split()[0], case=False, na=False)]
-                if len(imp) > 0:
-                    aliquota = imp.iloc[0]['Alíquota (%)'] / 100
-            
-            taxa_mp = 0.16
-            taxa_fixa = 5.0
-            if not canais_df.empty:
-                can = canais_df[canais_df['Canal'].str.contains(canal.replace('_', ' '), case=False, na=False)]
-                if len(can) > 0:
-                    taxa_mp = can.iloc[0].get('Taxa Marketplace (%)', 16) / 100
-                    taxa_fixa = can.iloc[0].get('Taxa Fixa Pedido (R$)', 5)
-            
-            custo_emb = custos_ped_df['Custo Unitário (R$)'].sum() if not custos_ped_df.empty else 0
-            
-            # Calcular rateio de Ads proporcional ao valor total da venda
-            total_vendas_dia = df_novo['Total'].sum()
-            
-            resultados = []
-            for _, row in df_novo.iterrows():
-                prod = row['Produto']
-                qtd = row['Quantidade']
-                total = row['Total']
+        total_cost = 0.0
+        for sku, qty in zip(components, quantities):
+            prod_row = products_df[products_df['Código'].astype(str) == str(sku)]
+            if not prod_row.empty:
+                cost = clean_currency(prod_row.iloc[0]['Custo (R$)'])
+                total_cost += cost * qty
                 
-                custo_unit = 0
-                tipo = 'Simples'
-                
-                # Normalizar para busca
-                prod_norm = normalizar(prod)
-                
-                # Buscar em produtos
-                prod_encontrado = False
-                if not produtos_df.empty:
-                    for _, p in produtos_df.iterrows():
-                        if normalizar(p['Código']) == prod_norm:
-                            custo_unit = p.get('Custo (R$)', 0) or 0
-                            prod_encontrado = True
-                            break
-                
-                # Se não achou, buscar em kits (NOVA LÓGICA V3)
-                if not prod_encontrado and not kits_df.empty:
-                    # Procurar o kit pelo código
-                    kit_match = None
-                    for _, k in kits_df.iterrows():
-                        if normalizar(k['Código Kit']) == prod_norm:
-                            kit_match = k
-                            break
-                    
-                    if kit_match is not None:
-                        tipo = 'Kit'
-                        custo_unit = 0
-                        
-                        # Extrair componentes e quantidades (separados por ;)
-                        skus_str = str(kit_match.get('SKUs Componentes', ''))
-                        qtds_str = str(kit_match.get('Qtd Componentes', ''))
-                        
-                        skus = [s.strip() for s in skus_str.split(';') if s.strip()]
-                        qtds = [q.strip() for q in qtds_str.split(';') if q.strip()]
-                        
-                        # Se não tiver quantidade explícita, assume 1 para cada
-                        if len(qtds) < len(skus):
-                            qtds = ['1'] * len(skus)
-                            
-                        for sku, q in zip(skus, qtds):
-                            try:
-                                q_val = float(q.replace(',', '.'))
-                            except:
-                                q_val = 1.0
-                                
-                            # Buscar custo do componente
-                            custo_comp = 0
-                            sku_norm = normalizar(sku)
-                            for _, p in produtos_df.iterrows():
-                                if normalizar(p['Código']) == sku_norm:
-                                    custo_comp = p.get('Custo (R$)', 0) or 0
-                                    break
-                            
-                            custo_unit += custo_comp * q_val
-                
-                imposto = total * aliquota
-                taxa = (total * taxa_mp) + taxa_fixa
-                
-                # Rateio de Ads proporcional ao valor da venda
-                ads_rateio = 0
-                if total_vendas_dia > 0:
-                    ads_rateio = (total / total_vendas_dia) * custo_ads
-                
-                custo_total = (custo_unit * qtd) + custo_emb + imposto + taxa + ads_rateio
-                lucro = total - custo_total
-                margem = (lucro / total) * 100 if total > 0 else 0
-                
-                resultados.append({
-                    'Data': row['Data'],
-                    'Canal': row['Canal'],
-                    'CNPJ': row['CNPJ'],
-                    'Produto': prod,
-                    'Tipo': tipo,
-                    'Qtd': qtd,
-                    'Total Venda': total,
-                    'Custo Produto': custo_unit * qtd,
-                    'Custo Emb.': custo_emb,
-                    'Imposto': imposto,
-                    'Taxa MP': taxa,
-                    'Ads': ads_rateio,
-                    'Custo Total': custo_total,
-                    'Lucro Líquido': lucro,
-                    'Margem %': margem
-                })
-            
-            df_final = pd.DataFrame(resultados)
-            df_final = df_final.fillna(0)
-            
-            # Guardar no session_state para revisão
-            st.session_state['df_processado'] = df_final
-            st.success("✅ Dados processados! Confira abaixo antes de enviar.")
-            
-        except Exception as e:
-            st.error(f"❌ Erro no processamento: {str(e)}")
+        return total_cost
+    except Exception as e:
+        # st.warning(f"Erro ao calcular kit {kit_sku}: {e}")
+        return 0.0
 
-    # Exibir tabela e botão de envio se houver dados processados
-    if 'df_processado' in st.session_state:
-        df_final = st.session_state['df_processado']
-        
-        st.dataframe(df_final.style.format({
-            'Total Venda': 'R$ {:.2f}',
-            'Custo Total': 'R$ {:.2f}',
-            'Lucro Líquido': 'R$ {:.2f}',
-            'Margem %': '{:.1f}%',
-            'Ads': 'R$ {:.2f}'
-        }))
-        
-        if not modo_teste:
-            st.divider()
-            st.warning("⚠️ Atenção: Ao clicar abaixo, os dados serão ADICIONADOS ao Google Sheets. O histórico NÃO será apagado.")
+def safe_write_to_sheet(sheet, tab_name, df, mode='overwrite'):
+    """
+    Escreve dados no Google Sheets de forma segura.
+    mode='overwrite': Limpa e escreve tudo.
+    mode='append': Adiciona ao final.
+    """
+    try:
+        try:
+            ws = sheet.worksheet(tab_name)
+        except:
+            ws = sheet.add_worksheet(title=tab_name, rows=1000, cols=20)
             
-            if st.button("💾 Confirmar e Enviar para Google Sheets"):
-                try:
-                    # Converter para lista de listas, tratando floats para string com ponto se necessário
-                    # O gspread lida bem com floats nativos do Python
-                    novo_conteudo = df_final.values.tolist()
+        # Prepara dados para escrita
+        # Converte NaN para "" e datas para string
+        df_clean = df.fillna("").astype(str)
+        data_to_write = df_clean.values.tolist()
+        headers = df_clean.columns.tolist()
+        
+        if mode == 'overwrite':
+            ws.clear()
+            ws.update([headers] + data_to_write)
+        elif mode == 'append':
+            # Verifica se está vazio para por cabeçalho
+            existing_data = ws.get_all_values()
+            if not existing_data:
+                ws.update([headers] + data_to_write)
+            else:
+                # Se já tem dados, verifica se cabeçalho bate (opcional, aqui confiamos na ordem)
+                ws.append_rows(data_to_write)
+                
+        return True
+    except Exception as e:
+        st.error(f"Erro ao salvar na aba '{tab_name}': {e}")
+        return False
+
+def format_currency_br(val):
+    try:
+        return f"R$ {float(val):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except:
+        return val
+
+def format_percent_br(val):
+    try:
+        return f"{float(val)*100:.2f}%".replace(".", ",")
+    except:
+        return val
+
+# --- LÓGICA PRINCIPAL ---
+
+sheet = connect_google_sheets()
+
+if sheet:
+    # Botão para limpar cache e recarregar configs
+    if st.sidebar.button("🔄 Recarregar Configurações (Limpar Cache)"):
+        st.cache_resource.clear()
+        st.rerun()
+
+    # Carregar Tabelas de Configuração
+    with st.spinner("Carregando configurações..."):
+        df_produtos = load_config_data(sheet, "Produtos", ["Código", "Custo (R$)", "Preço Venda (R$)", "Peso (g)"])
+        df_kits = load_config_data(sheet, "Kits", ["Código Kit", "SKUs Componentes", "Qtd Componentes"])
+        df_canais = load_config_data(sheet, "Canais", ["Canal", "Taxa Marketplace (%)", "Taxa Fixa Pedido (R$)"])
+        df_impostos = load_config_data(sheet, "Impostos", ["Tipo", "Alíquota (%)"])
+        df_custos_pedido = load_config_data(sheet, "Custos por Pedido", ["Item", "Custo Unitário (R$)"])
+        df_metas = load_config_data(sheet, "Metas", ["Valor"])
+
+    # Sidebar - Upload e Configs
+    st.sidebar.header("1. Upload de Arquivo")
+    uploaded_file = st.sidebar.file_uploader("Solte seu arquivo aqui (Excel/CSV)", type=["xlsx", "xls", "csv"])
+    
+    st.sidebar.header("2. Configurações do Pedido")
+    data_selecionada = st.sidebar.date_input("Data das Vendas", datetime.today())
+    canal_selecionado = st.sidebar.selectbox("Canal de Venda", df_canais["Canal"].unique())
+    regime_tributario = st.sidebar.selectbox("Regime Tributário", df_impostos["Tipo"].unique())
+
+    # Processamento
+    if uploaded_file:
+        try:
+            if uploaded_file.name.endswith('.csv'):
+                df_vendas = pd.read_csv(uploaded_file)
+            else:
+                df_vendas = pd.read_excel(uploaded_file)
+                
+            # Padronização de Colunas (Tenta adivinhar nomes comuns)
+            col_map = {
+                'SKU': 'SKU', 'Código': 'SKU', 'Ref': 'SKU', 'Referência': 'SKU',
+                'Qtd': 'Qtd', 'Quantidade': 'Qtd', 'Quant.': 'Qtd',
+                'Valor': 'Valor Total', 'Preço': 'Valor Total', 'Total': 'Valor Total', 'Venda': 'Valor Total'
+            }
+            df_vendas.rename(columns=lambda x: col_map.get(x, x), inplace=True)
+            
+            # Verifica colunas essenciais
+            if 'SKU' not in df_vendas.columns or 'Qtd' not in df_vendas.columns or 'Valor Total' not in df_vendas.columns:
+                st.error("O arquivo precisa ter colunas de SKU, Quantidade e Valor Total (ou nomes similares).")
+            else:
+                # --- CÁLCULOS ---
+                resultados = []
+                
+                # Taxas e Impostos
+                row_canal = df_canais[df_canais['Canal'] == canal_selecionado].iloc[0]
+                taxa_mp_pct = clean_percentage(row_canal['Taxa Marketplace (%)'])
+                taxa_fixa = clean_currency(row_canal['Taxa Fixa Pedido (R$)'])
+                
+                row_imposto = df_impostos[df_impostos['Tipo'] == regime_tributario].iloc[0]
+                aliquota_imposto = clean_percentage(row_imposto['Alíquota (%)'])
+                
+                custo_pedido_fixo = df_custos_pedido['Custo Unitário (R$)'].apply(clean_currency).sum()
+
+                for _, row in df_vendas.iterrows():
+                    sku = str(row['SKU']).strip()
+                    qtd = float(row['Qtd'])
+                    valor_venda = clean_currency(row['Valor Total'])
                     
-                    # 1. Dashboard Geral (APPEND ONLY)
-                    ws_dash = get_or_create_worksheet(ss, "1. Dashboard Geral")
-                    # Verificar se precisa de cabeçalho (se a primeira linha estiver vazia)
-                    vals_dash = ws_dash.get_all_values()
-                    is_empty_dash = not vals_dash or (len(vals_dash) == 1 and (not vals_dash[0] or not vals_dash[0][0]))
+                    # Identifica Produto ou Kit
+                    tipo = "Produto"
+                    custo_produto = 0.0
                     
-                    if is_empty_dash:
-                        ws_dash.clear() # Limpar para garantir
-                        ws_dash.append_row(df_final.columns.tolist())
-                    ws_dash.append_rows(novo_conteudo)
+                    # Busca em Produtos
+                    prod_match = df_produtos[df_produtos['Código'].astype(str) == sku]
+                    if not prod_match.empty:
+                        custo_produto = clean_currency(prod_match.iloc[0]['Custo (R$)'])
+                    else:
+                        # Busca em Kits
+                        kit_match = df_kits[df_kits['Código Kit'].astype(str) == sku]
+                        if not kit_match.empty:
+                            tipo = "Kit"
+                            custo_produto = get_kit_cost(sku, df_kits, df_produtos)
+                        else:
+                            tipo = "Não Encontrado"
+                            
+                    # Cálculos Financeiros
+                    custo_total_prod = custo_produto * qtd
+                    imposto_valor = valor_venda * aliquota_imposto
+                    taxa_mp_valor = (valor_venda * taxa_mp_pct) + (taxa_fixa * qtd) # Taxa fixa é por item ou pedido? Assumindo por item vendido na linha se for marketplace, ou ajustar conforme regra. Simplificando: taxa fixa * qtd.
                     
-                    # 6. Detalhes (APPEND ONLY)
-                    ws_detalhes = get_or_create_worksheet(ss, "6. Detalhes")
-                    vals_det = ws_detalhes.get_all_values()
-                    is_empty_det = not vals_det or (len(vals_det) == 1 and (not vals_det[0] or not vals_det[0][0]))
+                    # Rateio de Custo Fixo do Pedido (Embalagem, etc) - Simplificação: Custo fixo por linha de venda
+                    custo_emb = custo_pedido_fixo * qtd 
                     
-                    if is_empty_det:
-                        ws_detalhes.clear()
-                        ws_detalhes.append_row(df_final.columns.tolist())
-                    ws_detalhes.append_rows(novo_conteudo)
+                    custo_total = custo_total_prod + custo_emb + imposto_valor + taxa_mp_valor
+                    lucro = valor_venda - custo_total
+                    margem = (lucro / valor_venda) if valor_venda > 0 else 0
                     
-                    # RECALCULAR DASHBOARDS COM DADOS COMPLETOS
-                    # Ler todos os dados acumulados em "6. Detalhes"
-                    dados_completos = ws_detalhes.get_all_records()
-                    if dados_completos:
-                        df_completo = pd.DataFrame(dados_completos)
+                    resultados.append({
+                        "Data": data_selecionada.strftime("%Y-%m-%d"),
+                        "Canal": canal_selecionado,
+                        "CNPJ": regime_tributario, # Usando regime como proxy de CNPJ se não tiver campo específico
+                        "Produto": sku,
+                        "Tipo": tipo,
+                        "Qtd": qtd,
+                        "Total Venda": valor_venda,
+                        "Custo Produto": custo_total_prod,
+                        "Custo Emb.": custo_emb,
+                        "Imposto": imposto_valor,
+                        "Taxa MP": taxa_mp_valor,
+                        "Ads": 0.0, # Placeholder
+                        "Custo Total": custo_total,
+                        "Lucro Líquido": lucro,
+                        "Margem %": margem
+                    })
+                
+                df_resultados = pd.DataFrame(resultados)
+                
+                # --- EXIBIÇÃO ---
+                st.subheader("Prévia dos Resultados (Verifique antes de salvar)")
+                
+                # Métricas Rápidas
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Total Vendas", f"R$ {df_resultados['Total Venda'].sum():,.2f}")
+                col2.metric("Lucro Estimado", f"R$ {df_resultados['Lucro Líquido'].sum():,.2f}")
+                col3.metric("Margem Média", f"{df_resultados['Margem %'].mean()*100:.1f}%")
+                
+                st.dataframe(df_resultados.style.format({
+                    "Total Venda": "R$ {:,.2f}",
+                    "Lucro Líquido": "R$ {:,.2f}",
+                    "Margem %": "{:.1%}"
+                }))
+                
+                # --- BOTÃO DE SALVAR ---
+                st.warning("⚠️ Atenção: Ao clicar abaixo, os dados serão ADICIONADOS ao Google Sheets. O histórico NÃO será apagado.")
+                
+                if st.button("💾 Confirmar e Enviar para Google Sheets"):
+                    with st.spinner("Salvando dados e recalculando dashboards..."):
+                        # 1. Salva dados brutos (Append)
+                        sucesso_detalhes = safe_write_to_sheet(sheet, "6. Detalhes", df_resultados, mode='append')
+                        sucesso_dash = safe_write_to_sheet(sheet, "1. Dashboard Geral", df_resultados, mode='append')
                         
-                        # Converter colunas numéricas com a função robusta
-                        cols_num = ['Total Venda', 'Lucro Líquido', 'Margem %']
-                        for col in cols_num:
-                            if col in df_completo.columns:
-                                df_completo[col] = df_completo[col].apply(limpar_valor_monetario)
-                        
-                        # 2. Análise por CNPJ
-                        ws_cnpj = get_or_create_worksheet(ss, "2. Análise por CNPJ")
-                        if 'CNPJ' in df_completo.columns:
-                            df_cnpj = df_completo.groupby('CNPJ')[['Total Venda', 'Lucro Líquido']].sum().reset_index()
-                            df_cnpj['Margem Média %'] = (df_cnpj['Lucro Líquido'] / df_cnpj['Total Venda']) * 100
+                        if sucesso_detalhes and sucesso_dash:
+                            # 2. Lê TODO o histórico para recalcular resumos
+                            ws_detalhes = sheet.worksheet("6. Detalhes")
+                            all_data = ws_detalhes.get_all_records()
+                            df_historico = pd.DataFrame(all_data)
                             
-                            # Formatar para exibição
-                            df_cnpj_view = df_cnpj.copy()
-                            df_cnpj_view['Total Venda'] = df_cnpj_view['Total Venda'].apply(formatar_moeda_br)
-                            df_cnpj_view['Lucro Líquido'] = df_cnpj_view['Lucro Líquido'].apply(formatar_moeda_br)
-                            df_cnpj_view['Margem Média %'] = df_cnpj_view['Margem Média %'].apply(formatar_porcentagem_br)
+                            # Converte colunas numéricas do histórico
+                            cols_num = ['Total Venda', 'Lucro Líquido', 'Margem %', 'Qtd']
+                            for col in cols_num:
+                                if col in df_historico.columns:
+                                    df_historico[col] = df_historico[col].apply(clean_currency)
                             
-                            ws_cnpj.clear()
-                            ws_cnpj.update([df_cnpj_view.columns.values.tolist()] + df_cnpj_view.fillna(0).values.tolist())
-                        
-                        # 3. Análise Executiva
-                        ws_exec = get_or_create_worksheet(ss, "3. Análise Executiva")
-                        if 'Canal' in df_completo.columns:
-                            df_exec = df_completo.groupby('Canal')[['Total Venda', 'Lucro Líquido']].sum().reset_index()
-                            df_exec['Margem %'] = (df_exec['Lucro Líquido'] / df_exec['Total Venda']) * 100
+                            # --- RECÁLCULO DOS DASHBOARDS ---
                             
-                            # Formatar para exibição
-                            df_exec_view = df_exec.copy()
-                            df_exec_view['Total Venda'] = df_exec_view['Total Venda'].apply(formatar_moeda_br)
-                            df_exec_view['Lucro Líquido'] = df_exec_view['Lucro Líquido'].apply(formatar_moeda_br)
-                            df_exec_view['Margem %'] = df_exec_view['Margem %'].apply(formatar_porcentagem_br)
+                            # A. Análise por CNPJ (Regime)
+                            if 'CNPJ' in df_historico.columns:
+                                df_cnpj = df_historico.groupby('CNPJ')[['Total Venda', 'Lucro Líquido']].sum().reset_index()
+                                df_cnpj['Margem Média %'] = df_cnpj['Lucro Líquido'] / df_cnpj['Total Venda']
+                                # Formatação
+                                df_cnpj_view = df_cnpj.copy()
+                                df_cnpj_view['Total Venda'] = df_cnpj_view['Total Venda'].apply(format_currency_br)
+                                df_cnpj_view['Lucro Líquido'] = df_cnpj_view['Lucro Líquido'].apply(format_currency_br)
+                                df_cnpj_view['Margem Média %'] = df_cnpj_view['Margem Média %'].apply(format_percent_br)
+                                safe_write_to_sheet(sheet, "2. Análise por CNPJ", df_cnpj_view, mode='overwrite')
                             
-                            ws_exec.clear()
-                            ws_exec.update([df_exec_view.columns.values.tolist()] + df_exec_view.fillna(0).values.tolist())
-                        
-                        # 4. Preços Marketplaces
-                        ws_precos = get_or_create_worksheet(ss, "4. Preços Marketplaces")
-                        if 'Produto' in df_completo.columns and 'Canal' in df_completo.columns:
-                            df_precos = df_completo.groupby(['Produto', 'Canal'])['Total Venda'].mean().reset_index()
-                            
-                            # Formatar para exibição
-                            df_precos_view = df_precos.copy()
-                            df_precos_view['Total Venda'] = df_precos_view['Total Venda'].apply(formatar_moeda_br)
-                            
-                            ws_precos.clear()
-                            ws_precos.update([df_precos_view.columns.values.tolist()] + df_precos_view.fillna(0).values.tolist())
-                    
-                    st.toast("✅ Dados adicionados e dashboards atualizados!", icon="🚀")
-                    st.success("✅ Envio concluído! Pode processar o próximo arquivo.")
-                    
-                    # Limpar estado após envio
-                    del st.session_state['df_processado']
-                    
-                except Exception as e:
-                    st.error(f"❌ Erro ao salvar no Google Sheets: {str(e)}")
+                            # B. Análise Executiva (Por Canal)
+                            if 'Canal' in df_historico.columns:
+                                df_exec = df_historico.groupby('Canal')[['Total Venda', 'Lucro Líquido']].sum().reset_index()
+                                df_exec['Margem %'] = df_exec['Lucro Líquido'] / df_exec['Total Venda']
+                                # Formatação
+                                df_exec_view = df_exec.copy()
+                                df_exec_view['Total Venda'] = df_exec_view['Total Venda'].apply(format_currency_br)
+                                df_exec_view['Lucro Líquido'] = df_exec_view['Lucro Líquido'].apply(format_currency_br)
+                                df_exec_view['Margem %'] = df_exec_view['Margem %'].apply(format_percent_br)
+                                safe_write_to_sheet(sheet, "3. Análise Executiva", df_exec_view, mode='overwrite')
+                                
+                            # C. Preços Marketplaces (Média de Venda por Produto)
+                            if 'Produto' in df_historico.columns:
+                                df_precos = df_historico.groupby(['Produto', 'Canal'])['Total Venda'].mean().reset_index()
+                                df_precos.rename(columns={'Total Venda': 'Preço Médio Venda'}, inplace=True)
+                                df_precos_view = df_precos.copy()
+                                df_precos_view['Preço Médio Venda'] = df_precos_view['Preço Médio Venda'].apply(format_currency_br)
+                                safe_write_to_sheet(sheet, "4. Preços Marketplaces", df_precos_view, mode='overwrite')
+
+                            # D. Matriz BCG (NOVO!)
+                            if 'Produto' in df_historico.columns:
+                                # Agrupa por produto
+                                df_bcg = df_historico.groupby('Produto').agg({
+                                    'Total Venda': 'sum',
+                                    'Lucro Líquido': 'sum',
+                                    'Qtd': 'sum'
+                                }).reset_index()
+                                
+                                df_bcg['Margem %'] = df_bcg['Lucro Líquido'] / df_bcg['Total Venda']
+                                
+                                # Critérios de Classificação (Média)
+                                media_vendas = df_bcg['Total Venda'].mean()
+                                media_margem = df_bcg['Margem %'].mean()
+                                
+                                def classificar_bcg(row):
+                                    alta_venda = row['Total Venda'] >= media_vendas
+                                    alta_margem = row['Margem %'] >= media_margem
+                                    
+                                    if alta_venda and alta_margem:
+                                        return "⭐ Estrela"
+                                    elif alta_venda and not alta_margem:
+                                        return "🐄 Vaca Leiteira"
+                                    elif not alta_venda and alta_margem:
+                                        return "❓ Interrogação"
+                                    else:
+                                        return "🍍 Abacaxi"
+                                
+                                df_bcg['Classificação'] = df_bcg.apply(classificar_bcg, axis=1)
+                                
+                                # Formatação para salvar
+                                df_bcg_view = df_bcg[['Produto', 'Total Venda', 'Margem %', 'Classificação']].copy()
+                                df_bcg_view['Total Venda'] = df_bcg_view['Total Venda'].apply(format_currency_br)
+                                df_bcg_view['Margem %'] = df_bcg_view['Margem %'].apply(format_percent_br)
+                                
+                                safe_write_to_sheet(sheet, "5. Matriz BCG", df_bcg_view, mode='overwrite')
+
+                            st.success("✅ Dados salvos e dashboards atualizados com sucesso!")
+                            st.balloons()
+                        else:
+                            st.error("Erro ao salvar dados.")
+
+        except Exception as e:
+            st.error(f"Erro ao processar arquivo: {e}")
