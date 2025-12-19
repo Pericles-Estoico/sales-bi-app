@@ -9,7 +9,7 @@ import io
 import time
 
 # ==============================================================================
-# VERSÃO V19 - FINAL E DESTRAVADA
+# VERSÃO V20 - FINAL E COMPLETA
 # CORREÇÕES ACUMULADAS:
 # 1. Autenticação restaurada
 # 2. Matriz BCG implementada (Geral e Por Canal)
@@ -22,9 +22,10 @@ import time
 # 9. Aba '4. Preços Marketplaces' implementada
 # 10. Relatório de Produtos Faltantes (Download)
 # 11. Botões de Download dos Relatórios
-# 12. CORREÇÃO CRÍTICA: Criação automática de abas inexistentes
-# 13. CORREÇÃO CRÍTICA: Formatação de texto forçada (R$ e %) na planilha
-# 14. CORREÇÃO CRÍTICA: Leitura inteligente de valores formatados
+# 12. Criação automática de abas inexistentes
+# 13. Formatação de texto forçada (R$ e %) na planilha
+# 14. Leitura inteligente de valores formatados
+# 15. NOVO: Botão de Atualização Manual (Limpar Cache)
 # ==============================================================================
 
 # ==============================================================================
@@ -63,7 +64,6 @@ def clean_currency(value):
     except: return 0.0
 
 def clean_percent_read(value):
-    # Lê "25,88%" e transforma em 0.2588 para cálculo
     if pd.isna(value) or value == '': return 0.0
     s_val = str(value).strip().replace('%', '').replace(' ', '')
     if ',' in s_val: s_val = s_val.replace('.', '').replace(',', '.')
@@ -135,7 +135,6 @@ def carregar_dados_detalhes():
             
         df = pd.DataFrame(all_values[header_idx+1:], columns=all_values[header_idx])
         
-        # Conversão inteligente para cálculo
         cols_money = ['Total Venda', 'Custo Total', 'Lucro Bruto', 'Investimento Ads', 'Custo Produto', 'Impostos', 'Comissão', 'Taxas Fixas', 'Embalagem']
         for col in cols_money:
             if col in df.columns: df[col] = df[col].apply(clean_currency)
@@ -219,14 +218,12 @@ def processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads_total):
     df_novo['Canal'] = CHANNELS[canal]
     df_novo['CNPJ'] = cnpj_regime
 
-    # Carregar configs
     produtos_df = st.session_state.get('produtos', pd.DataFrame())
     kits_df = st.session_state.get('kits', pd.DataFrame())
     impostos_df = st.session_state.get('impostos', pd.DataFrame())
     canais_df = st.session_state.get('canais', pd.DataFrame())
     custos_ped_df = st.session_state.get('custos_ped', pd.DataFrame())
 
-    # Mapeamentos
     produtos_map = {}
     if not produtos_df.empty and 'Código' in produtos_df.columns:
         for _, row in produtos_df.iterrows():
@@ -241,7 +238,6 @@ def processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads_total):
             if len(qtds) < len(comps): qtds = [1]*len(comps)
             kits_map[cod_kit] = [{'sku': c.strip(), 'qtd': clean_float(q)} for c, q in zip(comps, qtds)]
 
-    # Parâmetros
     aliquota = 0.06
     if not impostos_df.empty and 'Tipo' in impostos_df.columns:
         m = impostos_df[impostos_df['Tipo'].str.contains(cnpj_regime.split()[0], case=False, na=False)]
@@ -319,7 +315,6 @@ def atualizar_dashboards_resumo(df_detalhes):
         'Total Venda': 'sum', 'Lucro Bruto': 'sum', 'Margem (%)': 'mean'
     }).reset_index()
     
-    # BCG GERAL
     dash_exec = df_detalhes.groupby('Produto').agg({
         'Quantidade': 'sum', 'Total Venda': 'sum', 'Lucro Bruto': 'sum', 'Margem (%)': 'mean'
     }).reset_index()
@@ -327,7 +322,6 @@ def atualizar_dashboards_resumo(df_detalhes):
     med_m = dash_exec['Margem (%)'].median()
     dash_exec['Classificação BCG'] = dash_exec.apply(lambda x: classificar_bcg(x, med_v, med_m), axis=1)
     
-    # BCG POR CANAL
     dash_bcg_canal = df_detalhes.groupby(['Canal', 'Produto']).agg({
         'Total Venda': 'sum', 'Margem (%)': 'mean', 'Quantidade': 'sum'
     }).reset_index()
@@ -340,7 +334,6 @@ def atualizar_dashboards_resumo(df_detalhes):
         bcg_final.append(subset)
     df_bcg_final = pd.concat(bcg_final) if bcg_final else pd.DataFrame()
 
-    # PREÇOS MARKETPLACES (Aba 4)
     df_precos = df_detalhes.groupby(['Produto', 'Canal']).agg({
         'Total Venda': 'sum', 'Quantidade': 'sum'
     }).reset_index()
@@ -362,10 +355,19 @@ except Exception as e:
     st.error(f"Erro conexão: {e}")
     st.stop()
 
-st.title("📊 Sales BI Pro - Dashboard Executivo V19")
+st.title("📊 Sales BI Pro - Dashboard Executivo V20")
 
 with st.sidebar:
     st.header("📥 Importar Vendas")
+    
+    # BOTÃO DE ATUALIZAÇÃO MANUAL
+    if st.button("🔄 Atualizar Dados (Limpar Cache)"):
+        carregar_dados_detalhes.clear()
+        carregar_configuracoes.clear()
+        st.success("Cache limpo! Recarregando...")
+        time.sleep(1)
+        st.rerun()
+        
     formato = st.radio("Formato", ['Bling', 'Padrão'])
     canal = st.selectbox("Canal", list(CHANNELS.keys()), format_func=lambda x: CHANNELS[x])
     cnpj_regime = st.selectbox("CNPJ/Regime", ['Simples Nacional', 'Lucro Presumido', 'Lucro Real'])
@@ -380,7 +382,6 @@ with st.sidebar:
                 df_processado, df_faltantes = processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads)
                 
                 if df_processado is not None and not df_processado.empty:
-                    # Salvar Detalhes (COM FORMATAÇÃO FORÇADA)
                     ws_detalhes = ss.worksheet("6. Detalhes")
                     first_row = ws_detalhes.row_values(1)
                     if not first_row or 'Total Venda' not in first_row or 'Lucro Bruto' not in first_row:
@@ -388,7 +389,6 @@ with st.sidebar:
                         ws_detalhes.append_row(COLUNAS_ESPERADAS)
                     
                     df_salvar = df_processado.copy()
-                    # Formatar para texto visual antes de salvar
                     for c in df_salvar.columns:
                         if 'Margem' in c: df_salvar[c] = df_salvar[c].apply(format_percent_br)
                         elif any(x in c for x in ['Venda', 'Lucro', 'Custo', 'Preço', 'Impostos', 'Comissão', 'Taxas', 'Embalagem', 'Ads']): 
@@ -398,7 +398,6 @@ with st.sidebar:
                     ws_detalhes.append_rows(df_salvar.astype(str).values.tolist())
                     st.success(f"✅ {len(df_processado)} vendas salvas!")
                     
-                    # Atualizar Dashboards
                     carregar_dados_detalhes.clear()
                     df_historico = carregar_dados_detalhes()
                     if not df_historico.empty:
@@ -427,7 +426,6 @@ with st.sidebar:
                         
                         st.success("Dashboards atualizados!")
                         
-                        # Alerta de Faltantes
                         if not df_faltantes.empty:
                             st.warning(f"⚠️ {len(df_faltantes)} produtos não encontrados no cadastro!")
                             st.download_button("📥 Baixar Lista de Faltantes", 
@@ -444,7 +442,6 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📈 Visão Geral", "🏢 Por CNP
 df_detalhes = carregar_dados_detalhes()
 
 if not df_detalhes.empty and 'Total Venda' in df_detalhes.columns:
-    # Recalcular para visualização
     d_geral, d_cnpj, d_exec, d_bcg, d_precos = atualizar_dashboards_resumo(df_detalhes)
 
     with tab1:
