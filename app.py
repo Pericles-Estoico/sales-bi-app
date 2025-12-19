@@ -9,7 +9,7 @@ import io
 import time
 
 # ==============================================================================
-# VERSÃO V21 - CORREÇÃO DE PREÇOS E NAN
+# VERSÃO V22 - ORDENAÇÃO BCG E REVISÃO EMBALAGEM
 # CORREÇÕES ACUMULADAS:
 # 1. Autenticação restaurada
 # 2. Matriz BCG implementada (Geral e Por Canal)
@@ -26,8 +26,9 @@ import time
 # 13. Formatação de texto forçada (R$ e %) na planilha
 # 14. Leitura inteligente de valores formatados
 # 15. Botão de Atualização Manual (Limpar Cache)
-# 16. NOVO: Tratamento de 'nan' na aba de preços (substituído por '-')
-# 17. NOVO: Formatação forçada de R$ na aba de preços
+# 16. Tratamento de 'nan' na aba de preços (substituído por '-')
+# 17. Formatação forçada de R$ na aba de preços
+# 18. NOVO: Ordenação BCG (Vaca -> Estrela -> Interrogação -> Abacaxi)
 # ==============================================================================
 
 # ==============================================================================
@@ -51,6 +52,9 @@ COLUNAS_ESPERADAS = [
     'Custo Produto', 'Impostos', 'Comissão', 'Taxas Fixas', 'Embalagem',
     'Investimento Ads', 'Custo Total', 'Lucro Bruto', 'Margem (%)'
 ]
+
+# Ordem personalizada para BCG
+ORDEM_BCG = ['Vaca Leiteira 🐄', 'Estrela ⭐', 'Interrogação ❓', 'Abacaxi 🍍']
 
 # ==============================================================================
 # FUNÇÕES UTILITÁRIAS
@@ -289,6 +293,7 @@ def processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads_total):
         taxa_fixa_val = taxa_fixa * qtd
         ads_rateio = (total_venda / total_vendas_dia) * custo_ads_total if total_vendas_dia > 0 else 0.0
         
+        # Custo de embalagem é por unidade vendida (kit conta como 1 unidade)
         custo_total_geral = custo_total_prod + imposto_val + comissao_val + taxa_fixa_val + (custo_emb * qtd) + ads_rateio
         lucro = total_venda - custo_total_geral
         margem = (lucro / total_venda) if total_venda > 0 else 0.0
@@ -324,6 +329,10 @@ def atualizar_dashboards_resumo(df_detalhes):
     med_m = dash_exec['Margem (%)'].median()
     dash_exec['Classificação BCG'] = dash_exec.apply(lambda x: classificar_bcg(x, med_v, med_m), axis=1)
     
+    # Ordenação BCG Geral
+    dash_exec['Classificação BCG'] = pd.Categorical(dash_exec['Classificação BCG'], categories=ORDEM_BCG, ordered=True)
+    dash_exec = dash_exec.sort_values('Classificação BCG')
+    
     dash_bcg_canal = df_detalhes.groupby(['Canal', 'Produto']).agg({
         'Total Venda': 'sum', 'Margem (%)': 'mean', 'Quantidade': 'sum'
     }).reset_index()
@@ -334,7 +343,12 @@ def atualizar_dashboards_resumo(df_detalhes):
         med_m_c = subset['Margem (%)'].median()
         subset['Classificação'] = subset.apply(lambda x: classificar_bcg(x, med_v_c, med_m_c), axis=1)
         bcg_final.append(subset)
+    
     df_bcg_final = pd.concat(bcg_final) if bcg_final else pd.DataFrame()
+    if not df_bcg_final.empty:
+        # Ordenação BCG por Canal
+        df_bcg_final['Classificação'] = pd.Categorical(df_bcg_final['Classificação'], categories=ORDEM_BCG, ordered=True)
+        df_bcg_final = df_bcg_final.sort_values(['Canal', 'Classificação'])
 
     df_precos = df_detalhes.groupby(['Produto', 'Canal']).agg({
         'Total Venda': 'sum', 'Quantidade': 'sum'
@@ -357,7 +371,7 @@ except Exception as e:
     st.error(f"Erro conexão: {e}")
     st.stop()
 
-st.title("📊 Sales BI Pro - Dashboard Executivo V21")
+st.title("📊 Sales BI Pro - Dashboard Executivo V22")
 
 with st.sidebar:
     st.header("📥 Importar Vendas")
@@ -415,10 +429,9 @@ with st.sidebar:
                                 ws.clear()
                                 df_fmt = df.copy()
                                 
-                                # Lógica específica para formatação de preços e NaN
                                 if nome == "4. Preços Marketplaces":
                                     for col in df_fmt.columns:
-                                        if col != 'Produto': # Todas as colunas exceto Produto são preços
+                                        if col != 'Produto':
                                             df_fmt[col] = df_fmt[col].apply(lambda x: format_currency_br(x) if pd.notna(x) and x != 0 else "-")
                                 else:
                                     for c in df_fmt.columns:
@@ -471,7 +484,6 @@ if not df_detalhes.empty and 'Total Venda' in df_detalhes.columns:
         st.download_button("📥 Baixar BCG por Canal", data=to_excel(d_bcg), file_name="bcg_canal.xlsx")
     with tab5:
         st.subheader("Preços Médios por Marketplace")
-        # Formatação visual no Streamlit
         st.dataframe(d_precos.style.format(lambda x: f"R$ {x:,.2f}" if isinstance(x, (int, float)) and pd.notna(x) else ("-" if pd.isna(x) else x)))
         st.download_button("📥 Baixar Preços", data=to_excel(d_precos), file_name="precos_marketplaces.xlsx")
     with tab6:
