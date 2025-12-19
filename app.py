@@ -20,6 +20,7 @@ def normalizar(texto):
 
 def converter_bling(df, data):
     d = pd.DataFrame()
+    # Forçar data correta
     d['Data'] = data
     d['Produto'] = df['Código']
     d['Quantidade'] = df['Quantidade']
@@ -158,7 +159,9 @@ with st.sidebar:
     if uploaded_file and st.button("🔄 Processar"):
         try:
             df_orig = pd.read_excel(uploaded_file)
-            df_novo = converter_bling(df_orig, data_venda.strftime('%Y-%m-%d')) if 'Código' in df_orig.columns else df_orig.copy()
+            # Passar data formatada corretamente
+            data_str = data_venda.strftime('%Y-%m-%d')
+            df_novo = converter_bling(df_orig, data_str) if 'Código' in df_orig.columns else df_orig.copy()
             df_novo['Canal'] = CHANNELS[canal]
             df_novo['CNPJ'] = cnpj_regime
             
@@ -341,71 +344,54 @@ with st.sidebar:
                 })
             
             df_final = pd.DataFrame(resultados)
-            
-            # Preencher NaN com 0 para evitar erro JSON
             df_final = df_final.fillna(0)
             
-            st.success("✅ Processamento concluído!")
-            st.dataframe(df_final.style.format({
-                'Total Venda': 'R$ {:.2f}',
-                'Custo Total': 'R$ {:.2f}',
-                'Lucro Líquido': 'R$ {:.2f}',
-                'Margem %': '{:.1f}%',
-                'Ads': 'R$ {:.2f}'
-            }))
+            # Guardar no session_state para revisão
+            st.session_state['df_processado'] = df_final
+            st.success("✅ Dados processados! Confira abaixo antes de enviar.")
             
-            if not modo_teste:
-                # Salvar no Google Sheets
+        except Exception as e:
+            st.error(f"❌ Erro no processamento: {str(e)}")
+
+    # Exibir tabela e botão de envio se houver dados processados
+    if 'df_processado' in st.session_state:
+        df_final = st.session_state['df_processado']
+        
+        st.dataframe(df_final.style.format({
+            'Total Venda': 'R$ {:.2f}',
+            'Custo Total': 'R$ {:.2f}',
+            'Lucro Líquido': 'R$ {:.2f}',
+            'Margem %': '{:.1f}%',
+            'Ads': 'R$ {:.2f}'
+        }))
+        
+        if not modo_teste:
+            st.divider()
+            st.warning("⚠️ Atenção: Ao clicar abaixo, os dados serão ADICIONADOS ao Google Sheets. O histórico NÃO será apagado.")
+            
+            if st.button("💾 Confirmar e Enviar para Google Sheets"):
                 try:
-                    # 1. Dashboard Geral
-                    ws_dash = get_or_create_worksheet(ss, "1. Dashboard Geral")
-                    dados_existentes = ws_dash.get_all_values()
                     novo_conteudo = df_final.values.tolist()
                     
-                    if len(dados_existentes) <= 1:
+                    # 1. Dashboard Geral (APPEND ONLY)
+                    ws_dash = get_or_create_worksheet(ss, "1. Dashboard Geral")
+                    # Verificar se precisa de cabeçalho
+                    if len(ws_dash.get_all_values()) < 1:
                         ws_dash.append_row(df_final.columns.tolist())
-                    
                     ws_dash.append_rows(novo_conteudo)
                     
-                    # 2. Análise por CNPJ
-                    ws_cnpj = get_or_create_worksheet(ss, "2. Análise por CNPJ")
-                    df_cnpj = df_final.groupby('CNPJ')[['Total Venda', 'Lucro Líquido']].sum().reset_index()
-                    df_cnpj['Margem Média %'] = (df_cnpj['Lucro Líquido'] / df_cnpj['Total Venda']) * 100
-                    ws_cnpj.clear()
-                    ws_cnpj.update([df_cnpj.columns.values.tolist()] + df_cnpj.fillna(0).values.tolist())
-                    
-                    # 3. Análise Executiva
-                    ws_exec = get_or_create_worksheet(ss, "3. Análise Executiva")
-                    df_exec = df_final.groupby('Canal')[['Total Venda', 'Lucro Líquido']].sum().reset_index()
-                    df_exec['Margem %'] = (df_exec['Lucro Líquido'] / df_exec['Total Venda']) * 100
-                    ws_exec.clear()
-                    ws_exec.update([df_exec.columns.values.tolist()] + df_exec.fillna(0).values.tolist())
-                    
-                    # 4. Preços Marketplaces
-                    ws_precos = get_or_create_worksheet(ss, "4. Preços Marketplaces")
-                    df_precos = df_final.groupby(['Produto', 'Canal'])['Total Venda'].mean().reset_index()
-                    ws_precos.clear()
-                    ws_precos.update([df_precos.columns.values.tolist()] + df_precos.fillna(0).values.tolist())
-                    
-                    # 6. Detalhes (com coluna Ads)
+                    # 6. Detalhes (APPEND ONLY)
                     ws_detalhes = get_or_create_worksheet(ss, "6. Detalhes")
-                    
-                    # Verificar se cabeçalho existe e tem Ads
-                    cabecalho_atual = []
-                    try:
-                        cabecalho_atual = ws_detalhes.row_values(1)
-                    except: pass
-                    
-                    if not cabecalho_atual or 'Ads' not in cabecalho_atual:
-                        ws_detalhes.clear()
+                    # Verificar se precisa de cabeçalho
+                    if len(ws_detalhes.get_all_values()) < 1:
                         ws_detalhes.append_row(df_final.columns.tolist())
-                    
                     ws_detalhes.append_rows(novo_conteudo)
                     
-                    st.toast("💾 Dados salvos no Google Sheets com sucesso!", icon="✅")
+                    st.toast("✅ Dados adicionados com sucesso! Histórico preservado.", icon="🚀")
+                    st.success("✅ Envio concluído! Pode processar o próximo arquivo.")
+                    
+                    # Limpar estado após envio
+                    del st.session_state['df_processado']
                     
                 except Exception as e:
                     st.error(f"❌ Erro ao salvar no Google Sheets: {str(e)}")
-        
-        except Exception as e:
-            st.error(f"❌ Erro no processamento: {str(e)}")
