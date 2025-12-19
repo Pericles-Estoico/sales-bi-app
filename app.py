@@ -61,6 +61,20 @@ def limpar_valor_monetario(valor):
     except ValueError:
         return 0.0
 
+def formatar_moeda_br(valor):
+    """Formata float para string R$ 1.234,56"""
+    try:
+        return f"R$ {float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except:
+        return valor
+
+def formatar_porcentagem_br(valor):
+    """Formata float para string 12,34%"""
+    try:
+        return f"{float(valor):.2f}%".replace(".", ",")
+    except:
+        return valor
+
 def converter_bling(df, data_str):
     d = pd.DataFrame()
     # Forçar data correta em todas as linhas
@@ -429,7 +443,6 @@ with st.sidebar:
                     ws_dash = get_or_create_worksheet(ss, "1. Dashboard Geral")
                     # Verificar se precisa de cabeçalho (se a primeira linha estiver vazia)
                     vals_dash = ws_dash.get_all_values()
-                    # CORREÇÃO V7: Verificação robusta de lista vazia
                     is_empty_dash = not vals_dash or (len(vals_dash) == 1 and (not vals_dash[0] or not vals_dash[0][0]))
                     
                     if is_empty_dash:
@@ -440,7 +453,6 @@ with st.sidebar:
                     # 6. Detalhes (APPEND ONLY)
                     ws_detalhes = get_or_create_worksheet(ss, "6. Detalhes")
                     vals_det = ws_detalhes.get_all_values()
-                    # CORREÇÃO V7: Verificação robusta de lista vazia
                     is_empty_det = not vals_det or (len(vals_det) == 1 and (not vals_det[0] or not vals_det[0][0]))
                     
                     if is_empty_det:
@@ -465,23 +477,42 @@ with st.sidebar:
                         if 'CNPJ' in df_completo.columns:
                             df_cnpj = df_completo.groupby('CNPJ')[['Total Venda', 'Lucro Líquido']].sum().reset_index()
                             df_cnpj['Margem Média %'] = (df_cnpj['Lucro Líquido'] / df_cnpj['Total Venda']) * 100
+                            
+                            # Formatar para exibição
+                            df_cnpj_view = df_cnpj.copy()
+                            df_cnpj_view['Total Venda'] = df_cnpj_view['Total Venda'].apply(formatar_moeda_br)
+                            df_cnpj_view['Lucro Líquido'] = df_cnpj_view['Lucro Líquido'].apply(formatar_moeda_br)
+                            df_cnpj_view['Margem Média %'] = df_cnpj_view['Margem Média %'].apply(formatar_porcentagem_br)
+                            
                             ws_cnpj.clear()
-                            ws_cnpj.update([df_cnpj.columns.values.tolist()] + df_cnpj.fillna(0).values.tolist())
+                            ws_cnpj.update([df_cnpj_view.columns.values.tolist()] + df_cnpj_view.fillna(0).values.tolist())
                         
                         # 3. Análise Executiva
                         ws_exec = get_or_create_worksheet(ss, "3. Análise Executiva")
                         if 'Canal' in df_completo.columns:
                             df_exec = df_completo.groupby('Canal')[['Total Venda', 'Lucro Líquido']].sum().reset_index()
                             df_exec['Margem %'] = (df_exec['Lucro Líquido'] / df_exec['Total Venda']) * 100
+                            
+                            # Formatar para exibição
+                            df_exec_view = df_exec.copy()
+                            df_exec_view['Total Venda'] = df_exec_view['Total Venda'].apply(formatar_moeda_br)
+                            df_exec_view['Lucro Líquido'] = df_exec_view['Lucro Líquido'].apply(formatar_moeda_br)
+                            df_exec_view['Margem %'] = df_exec_view['Margem %'].apply(formatar_porcentagem_br)
+                            
                             ws_exec.clear()
-                            ws_exec.update([df_exec.columns.values.tolist()] + df_exec.fillna(0).values.tolist())
+                            ws_exec.update([df_exec_view.columns.values.tolist()] + df_exec_view.fillna(0).values.tolist())
                         
                         # 4. Preços Marketplaces
                         ws_precos = get_or_create_worksheet(ss, "4. Preços Marketplaces")
                         if 'Produto' in df_completo.columns and 'Canal' in df_completo.columns:
                             df_precos = df_completo.groupby(['Produto', 'Canal'])['Total Venda'].mean().reset_index()
+                            
+                            # Formatar para exibição
+                            df_precos_view = df_precos.copy()
+                            df_precos_view['Total Venda'] = df_precos_view['Total Venda'].apply(formatar_moeda_br)
+                            
                             ws_precos.clear()
-                            ws_precos.update([df_precos.columns.values.tolist()] + df_precos.fillna(0).values.tolist())
+                            ws_precos.update([df_precos_view.columns.values.tolist()] + df_precos_view.fillna(0).values.tolist())
                     
                     st.toast("✅ Dados adicionados e dashboards atualizados!", icon="🚀")
                     st.success("✅ Envio concluído! Pode processar o próximo arquivo.")
