@@ -9,7 +9,7 @@ import io
 import time
 
 # ==============================================================================
-# VERSÃO V15 - FINAL E INDESTRUTÍVEL
+# VERSÃO V16 - FINAL E BLINDADA CONTRA CONFIGURAÇÕES INCOMPLETAS
 # CORREÇÕES ACUMULADAS:
 # 1. Autenticação restaurada
 # 2. Matriz BCG implementada
@@ -18,7 +18,8 @@ import time
 # 5. Correção de leitura de float com vírgula (Kits)
 # 6. Correção de cabeçalho em abas vazias
 # 7. Limpeza de cache forçada
-# 8. CORREÇÃO CRÍTICA: Leitura manual de cabeçalho e reparo automático da planilha
+# 8. Leitura manual de cabeçalho e reparo automático
+# 9. CORREÇÃO CRÍTICA: Proteção contra colunas ausentes nas abas de configuração (Erro 'Tipo')
 # ==============================================================================
 
 # ==============================================================================
@@ -99,43 +100,26 @@ def conectar_google_sheets():
 
 @st.cache_data(ttl=60)
 def carregar_dados_detalhes():
-    """
-    Carrega dados de forma robusta. Se o cabeçalho estiver errado, tenta achar.
-    """
     try:
         ss, _ = conectar_google_sheets()
         ws = ss.worksheet("6. Detalhes")
-        
-        # Pega TUDO como lista de listas (muito mais seguro que get_all_records)
         all_values = ws.get_all_values()
+        if not all_values: return pd.DataFrame(columns=COLUNAS_ESPERADAS)
         
-        if not all_values:
-            return pd.DataFrame(columns=COLUNAS_ESPERADAS)
-            
-        # Procura onde está o cabeçalho (pode não ser a linha 1 se tiver lixo)
         header_idx = -1
-        for i, row in enumerate(all_values[:5]): # Olha as primeiras 5 linhas
-            # Verifica se pelo menos 3 colunas chave estão presentes
+        for i, row in enumerate(all_values[:5]):
             if 'Total Venda' in row and 'Lucro Bruto' in row and 'Produto' in row:
                 header_idx = i
                 break
         
-        if header_idx == -1:
-            # Se não achou cabeçalho, assume vazio ou corrompido
-            return pd.DataFrame(columns=COLUNAS_ESPERADAS)
+        if header_idx == -1: return pd.DataFrame(columns=COLUNAS_ESPERADAS)
             
-        # Cria DataFrame usando a linha certa como cabeçalho
         df = pd.DataFrame(all_values[header_idx+1:], columns=all_values[header_idx])
-        
-        # Converter colunas numéricas
         cols_num = ['Quantidade', 'Total Venda', 'Custo Total', 'Lucro Bruto', 'Margem (%)', 'Investimento Ads']
         for col in cols_num:
-            if col in df.columns:
-                df[col] = df[col].apply(clean_currency)
-                
+            if col in df.columns: df[col] = df[col].apply(clean_currency)
         return df
-    except Exception as e:
-        return pd.DataFrame(columns=COLUNAS_ESPERADAS)
+    except: return pd.DataFrame(columns=COLUNAS_ESPERADAS)
 
 @st.cache_data(ttl=3600)
 def carregar_configuracoes():
@@ -144,7 +128,6 @@ def carregar_configuracoes():
         configs_data = {}
         estoque_produtos = set()
         
-        # Carregar Estoque
         if "TEMPLATE_ESTOQUE_URL" in st.secrets:
             try:
                 ss_estoque = gc.open_by_url(st.secrets["TEMPLATE_ESTOQUE_URL"])
@@ -154,7 +137,6 @@ def carregar_configuracoes():
                     estoque_produtos = set(df_estoque['codigo'].tolist())
             except: pass
         
-        # Carregar Abas
         abas_config = [("Produtos", "produtos"), ("Kits", "kits"), ("Canais", "canais"), 
                        ("Custos por Pedido", "custos_ped"), ("Impostos", "impostos"), 
                        ("Frete", "frete"), ("Metas", "metas")]
@@ -165,7 +147,6 @@ def carregar_configuracoes():
                 data = sh.get_all_values()
                 if len(data) > 1:
                     cols = data[0]
-                    # Tratar colunas duplicadas
                     counts = {}
                     new_cols = []
                     for col in cols:
@@ -219,12 +200,12 @@ def processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads_total):
 
     # Mapeamentos
     produtos_map = {}
-    if not produtos_df.empty:
+    if not produtos_df.empty and 'Código' in produtos_df.columns:
         for _, row in produtos_df.iterrows():
             produtos_map[normalizar(str(row['Código']))] = {'custo': float(row.get('Custo (R$)', 0))}
 
     kits_map = {}
-    if not kits_df.empty:
+    if not kits_df.empty and 'Código Kit' in kits_df.columns:
         for _, row in kits_df.iterrows():
             cod_kit = normalizar(str(row['Código Kit']))
             comps = str(row.get('SKUs Componentes', '')).split(';') if ';' in str(row.get('SKUs Componentes', '')) else [str(row.get('SKUs Componentes', ''))]
@@ -232,20 +213,22 @@ def processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads_total):
             if len(qtds) < len(comps): qtds = [1]*len(comps)
             kits_map[cod_kit] = [{'sku': c.strip(), 'qtd': clean_float(q)} for c, q in zip(comps, qtds)]
 
-    # Parâmetros
+    # Parâmetros com Proteção (CORREÇÃO V16)
     aliquota = 0.06
-    if not impostos_df.empty:
+    if not impostos_df.empty and 'Tipo' in impostos_df.columns:
         m = impostos_df[impostos_df['Tipo'].str.contains(cnpj_regime.split()[0], case=False, na=False)]
         if not m.empty: aliquota = float(m.iloc[0]['Alíquota (%)']) / 100
 
     taxa_mp, taxa_fixa = 0.16, 5.0
-    if not canais_df.empty:
+    if not canais_df.empty and 'Canal' in canais_df.columns:
         m = canais_df[canais_df['Canal'].str.contains(canal.replace('_', ' '), case=False, na=False)]
         if not m.empty:
             taxa_mp = float(m.iloc[0].get('Taxa Marketplace (%)', 16)) / 100
             taxa_fixa = float(m.iloc[0].get('Taxa Fixa Pedido (R$)', 5))
 
-    custo_emb = custos_ped_df['Custo Unitário (R$)'].sum() if not custos_ped_df.empty else 0.0
+    custo_emb = 0.0
+    if not custos_ped_df.empty and 'Custo Unitário (R$)' in custos_ped_df.columns:
+        custo_emb = custos_ped_df['Custo Unitário (R$)'].sum()
 
     resultados = []
     total_vendas_dia = df_novo['Total'].sum()
@@ -290,10 +273,8 @@ def processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads_total):
 def atualizar_dashboards_resumo(df_detalhes):
     if df_detalhes.empty: return None, None, None, None
     
-    # Verifica se colunas existem antes de agrupar
     cols_req = ['Canal', 'Total Venda', 'Lucro Bruto', 'Quantidade', 'Margem (%)', 'CNPJ', 'Produto']
-    if not all(c in df_detalhes.columns for c in cols_req):
-        return None, None, None, None
+    if not all(c in df_detalhes.columns for c in cols_req): return None, None, None, None
 
     dash_geral = df_detalhes.groupby('Canal').agg({
         'Total Venda': 'sum', 'Lucro Bruto': 'sum', 'Quantidade': 'sum', 'Margem (%)': 'mean'
@@ -336,7 +317,7 @@ except Exception as e:
     st.error(f"Erro conexão: {e}")
     st.stop()
 
-st.title("📊 Sales BI Pro - Dashboard Executivo V15")
+st.title("📊 Sales BI Pro - Dashboard Executivo V16")
 
 with st.sidebar:
     st.header("📥 Importar Vendas")
@@ -355,32 +336,20 @@ with st.sidebar:
                 
                 if df_processado is not None and not df_processado.empty:
                     ws_detalhes = ss.worksheet("6. Detalhes")
-                    
-                    # --- CORREÇÃO V15: REPARO DE CABEÇALHO ---
-                    # Lê a primeira linha para ver se é o cabeçalho certo
                     first_row = ws_detalhes.row_values(1)
-                    
-                    # Se a primeira linha não tiver as colunas certas, REFAZ A PLANILHA
                     if not first_row or 'Total Venda' not in first_row or 'Lucro Bruto' not in first_row:
                         ws_detalhes.clear()
                         ws_detalhes.append_row(COLUNAS_ESPERADAS)
                     
-                    # Salvar dados
                     df_salvar = df_processado.copy()
-                    # Reordenar colunas para garantir match com cabeçalho
                     df_salvar = df_salvar[COLUNAS_ESPERADAS]
-                    
                     ws_detalhes.append_rows(df_salvar.astype(str).values.tolist())
                     st.success(f"✅ {len(df_processado)} vendas salvas!")
                     
-                    # Limpar cache e recarregar
                     carregar_dados_detalhes.clear()
-                    
-                    # Atualizar Resumos
-                    df_historico = carregar_dados_detalhes() # Já pega limpo
+                    df_historico = carregar_dados_detalhes()
                     if not df_historico.empty:
                         d_geral, d_cnpj, d_exec, d_bcg = atualizar_dashboards_resumo(df_historico)
-                        
                         def salvar_aba(nome, df):
                             try:
                                 ws = ss.worksheet(nome)
@@ -396,15 +365,11 @@ with st.sidebar:
                         if d_cnpj is not None: salvar_aba("2. Análise por CNPJ", d_cnpj)
                         if d_exec is not None: salvar_aba("3. Análise Executiva", d_exec)
                         if d_bcg is not None: salvar_aba("5. Matriz BCG", d_bcg)
-                        
                         st.success("Dashboards atualizados!")
                         time.sleep(1)
                         st.rerun()
-                    else:
-                        st.warning("Dados salvos, mas histórico parece vazio. Tente recarregar.")
-                        
-            except Exception as e:
-                st.error(f"Erro: {e}")
+                    else: st.warning("Dados salvos, mas histórico parece vazio.")
+            except Exception as e: st.error(f"Erro: {e}")
 
 st.divider()
 tab1, tab2, tab3, tab4 = st.tabs(["📈 Visão Geral", "🏢 Por CNPJ", "⭐ Matriz BCG", "📋 Detalhes"])
