@@ -270,24 +270,45 @@ with st.sidebar:
                             prod_encontrado = True
                             break
                 
-                # Se não achou, buscar em kits
+                # Se não achou, buscar em kits (NOVA LÓGICA V3)
                 if not prod_encontrado and not kits_df.empty:
-                    # Filtrar componentes do kit
-                    comps = kits_df[kits_df['Código Kit'].apply(normalizar) == prod_norm]
-                    if not comps.empty:
+                    # Procurar o kit pelo código
+                    kit_match = None
+                    for _, k in kits_df.iterrows():
+                        if normalizar(k['Código Kit']) == prod_norm:
+                            kit_match = k
+                            break
+                    
+                    if kit_match is not None:
                         tipo = 'Kit'
                         custo_unit = 0
-                        for _, comp in comps.iterrows():
-                            cod_comp = comp['Código Componente']
-                            qtd_comp = comp['Quantidade']
+                        
+                        # Extrair componentes e quantidades (separados por ;)
+                        skus_str = str(kit_match.get('SKUs Componentes', ''))
+                        qtds_str = str(kit_match.get('Qtd Componentes', ''))
+                        
+                        skus = [s.strip() for s in skus_str.split(';') if s.strip()]
+                        qtds = [q.strip() for q in qtds_str.split(';') if q.strip()]
+                        
+                        # Se não tiver quantidade explícita, assume 1 para cada
+                        if len(qtds) < len(skus):
+                            qtds = ['1'] * len(skus)
                             
+                        for sku, q in zip(skus, qtds):
+                            try:
+                                q_val = float(q.replace(',', '.'))
+                            except:
+                                q_val = 1.0
+                                
                             # Buscar custo do componente
                             custo_comp = 0
+                            sku_norm = normalizar(sku)
                             for _, p in produtos_df.iterrows():
-                                if normalizar(p['Código']) == normalizar(cod_comp):
+                                if normalizar(p['Código']) == sku_norm:
                                     custo_comp = p.get('Custo (R$)', 0) or 0
                                     break
-                            custo_unit += custo_comp * qtd_comp
+                            
+                            custo_unit += custo_comp * q_val
                 
                 imposto = total * aliquota
                 taxa = (total * taxa_mp) + taxa_fixa
