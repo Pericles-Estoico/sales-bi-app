@@ -9,7 +9,7 @@ import io
 import time
 
 # ==============================================================================
-# VERSÃO V16 - FINAL E BLINDADA CONTRA CONFIGURAÇÕES INCOMPLETAS
+# VERSÃO V17 - FINAL E REFINADA
 # CORREÇÕES ACUMULADAS:
 # 1. Autenticação restaurada
 # 2. Matriz BCG implementada
@@ -19,7 +19,8 @@ import time
 # 6. Correção de cabeçalho em abas vazias
 # 7. Limpeza de cache forçada
 # 8. Leitura manual de cabeçalho e reparo automático
-# 9. CORREÇÃO CRÍTICA: Proteção contra colunas ausentes nas abas de configuração (Erro 'Tipo')
+# 9. Proteção contra colunas ausentes nas configurações
+# 10. CORREÇÃO CRÍTICA: Arredondamento de margem (2 casas) e BCG Detalhada (Geral + Por Canal)
 # ==============================================================================
 
 # ==============================================================================
@@ -213,7 +214,7 @@ def processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads_total):
             if len(qtds) < len(comps): qtds = [1]*len(comps)
             kits_map[cod_kit] = [{'sku': c.strip(), 'qtd': clean_float(q)} for c, q in zip(comps, qtds)]
 
-    # Parâmetros com Proteção (CORREÇÃO V16)
+    # Parâmetros
     aliquota = 0.06
     if not impostos_df.empty and 'Tipo' in impostos_df.columns:
         m = impostos_df[impostos_df['Tipo'].str.contains(cnpj_regime.split()[0], case=False, na=False)]
@@ -260,6 +261,9 @@ def processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads_total):
         lucro = total_venda - custo_total_geral
         margem = (lucro / total_venda) if total_venda > 0 else 0.0
         
+        # CORREÇÃO V17: Arredondamento de Margem para 4 casas (ex: 0.3794) para ficar bonito na planilha
+        margem = round(margem, 4)
+
         resultados.append({
             'Data': row['Data'], 'Canal': row['Canal'], 'CNPJ': row['CNPJ'],
             'Produto': prod_cod, 'Tipo': tipo, 'Quantidade': qtd, 'Total Venda': total_venda,
@@ -284,6 +288,7 @@ def atualizar_dashboards_resumo(df_detalhes):
         'Total Venda': 'sum', 'Lucro Bruto': 'sum', 'Margem (%)': 'mean'
     }).reset_index()
     
+    # BCG GERAL (Todos os canais)
     dash_exec = df_detalhes.groupby('Produto').agg({
         'Quantidade': 'sum', 'Total Venda': 'sum', 'Lucro Bruto': 'sum', 'Margem (%)': 'mean'
     }).reset_index()
@@ -292,13 +297,17 @@ def atualizar_dashboards_resumo(df_detalhes):
     med_m = dash_exec['Margem (%)'].median()
     dash_exec['Classificação BCG'] = dash_exec.apply(lambda x: classificar_bcg(x, med_v, med_m), axis=1)
     
-    dash_bcg_canal = df_detalhes.groupby(['Canal', 'Produto']).agg({'Total Venda': 'sum', 'Margem (%)': 'mean'}).reset_index()
+    # BCG POR CANAL (Detalhado)
+    dash_bcg_canal = df_detalhes.groupby(['Canal', 'Produto']).agg({
+        'Total Venda': 'sum', 'Margem (%)': 'mean', 'Quantidade': 'sum'
+    }).reset_index()
+    
     bcg_final = []
     for canal in dash_bcg_canal['Canal'].unique():
         subset = dash_bcg_canal[dash_bcg_canal['Canal'] == canal].copy()
-        med_v = subset['Total Venda'].median()
-        med_m = subset['Margem (%)'].median()
-        subset['Classificação'] = subset.apply(lambda x: classificar_bcg(x, med_v, med_m), axis=1)
+        med_v_c = subset['Total Venda'].median()
+        med_m_c = subset['Margem (%)'].median()
+        subset['Classificação'] = subset.apply(lambda x: classificar_bcg(x, med_v_c, med_m_c), axis=1)
         bcg_final.append(subset)
     df_bcg_final = pd.concat(bcg_final) if bcg_final else pd.DataFrame()
 
@@ -317,7 +326,7 @@ except Exception as e:
     st.error(f"Erro conexão: {e}")
     st.stop()
 
-st.title("📊 Sales BI Pro - Dashboard Executivo V16")
+st.title("📊 Sales BI Pro - Dashboard Executivo V17")
 
 with st.sidebar:
     st.header("📥 Importar Vendas")
@@ -363,8 +372,8 @@ with st.sidebar:
 
                         if d_geral is not None: salvar_aba("1. Dashboard Geral", d_geral)
                         if d_cnpj is not None: salvar_aba("2. Análise por CNPJ", d_cnpj)
-                        if d_exec is not None: salvar_aba("3. Análise Executiva", d_exec)
-                        if d_bcg is not None: salvar_aba("5. Matriz BCG", d_bcg)
+                        if d_exec is not None: salvar_aba("3. Análise Executiva", d_exec) # BCG Geral
+                        if d_bcg is not None: salvar_aba("5. Matriz BCG", d_bcg) # BCG por Canal
                         st.success("Dashboards atualizados!")
                         time.sleep(1)
                         st.rerun()
@@ -372,18 +381,42 @@ with st.sidebar:
             except Exception as e: st.error(f"Erro: {e}")
 
 st.divider()
-tab1, tab2, tab3, tab4 = st.tabs(["📈 Visão Geral", "🏢 Por CNPJ", "⭐ Matriz BCG", "📋 Detalhes"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 Visão Geral", "🏢 Por CNPJ", "⭐ BCG Geral", "🎯 BCG por Canal", "📋 Detalhes"])
 df_detalhes = carregar_dados_detalhes()
 
 if not df_detalhes.empty and 'Total Venda' in df_detalhes.columns:
+    # Recalcular BCGs para visualização
+    dash_exec = df_detalhes.groupby('Produto').agg({
+        'Quantidade': 'sum', 'Total Venda': 'sum', 'Lucro Bruto': 'sum', 'Margem (%)': 'mean'
+    }).reset_index()
+    med_v = dash_exec['Total Venda'].median()
+    med_m = dash_exec['Margem (%)'].median()
+    dash_exec['Classificação'] = dash_exec.apply(lambda x: classificar_bcg(x, med_v, med_m), axis=1)
+
+    dash_bcg_canal = df_detalhes.groupby(['Canal', 'Produto']).agg({
+        'Total Venda': 'sum', 'Margem (%)': 'mean', 'Quantidade': 'sum'
+    }).reset_index()
+    bcg_final = []
+    for canal in dash_bcg_canal['Canal'].unique():
+        subset = dash_bcg_canal[dash_bcg_canal['Canal'] == canal].copy()
+        med_v_c = subset['Total Venda'].median()
+        med_m_c = subset['Margem (%)'].median()
+        subset['Classificação'] = subset.apply(lambda x: classificar_bcg(x, med_v_c, med_m_c), axis=1)
+        bcg_final.append(subset)
+    df_bcg_final = pd.concat(bcg_final) if bcg_final else pd.DataFrame()
+
     with tab1:
         st.metric("Vendas Totais", format_currency_br(df_detalhes['Total Venda'].sum()))
         st.bar_chart(df_detalhes.groupby('Canal')['Total Venda'].sum())
     with tab2:
         st.dataframe(df_detalhes.groupby(['CNPJ', 'Canal'])['Total Venda'].sum().unstack().style.format("R$ {:,.2f}"))
     with tab3:
-        st.info("Matriz BCG calculada na aba '5. Matriz BCG' da planilha.")
+        st.subheader("Matriz BCG Geral (Todos os Canais)")
+        st.dataframe(dash_exec.style.format({'Total Venda': 'R$ {:,.2f}', 'Margem (%)': '{:.2%}'}))
     with tab4:
+        st.subheader("Matriz BCG por Canal")
+        st.dataframe(df_bcg_final.style.format({'Total Venda': 'R$ {:,.2f}', 'Margem (%)': '{:.2%}'}))
+    with tab5:
         st.dataframe(df_detalhes)
 else:
     st.info("Aguardando dados...")
