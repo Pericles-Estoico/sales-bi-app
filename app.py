@@ -60,21 +60,50 @@ def carregar_configuracoes():
                 sh = ss.worksheet(nome)
                 data = sh.get_all_values()
                 if len(data) > 1:
-                    df = pd.DataFrame(data[1:], columns=data[0])
+                    # Tratar colunas duplicadas
+                    cols = data[0]
+                    seen = {}
+                    new_cols = []
+                    for c in cols:
+                        c = c.strip()
+                        if c in seen:
+                            seen[c] += 1
+                            new_cols.append(f"{c}_{seen[c]}")
+                        else:
+                            seen[c] = 0
+                            new_cols.append(c)
+                    
+                    df = pd.DataFrame(data[1:], columns=new_cols)
+                    
+                    # Limpar colunas numéricas
                     for col in df.columns:
                         if any(x in col for x in ['R$', '%', 'Peso', 'Custo', 'Preço', 'Taxa', 'Frete', 'Valor']):
                             df[col] = df[col].apply(lambda x: str(x).replace('R$', '').replace(' ', '').replace(',', '.') if pd.notna(x) else x)
                             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
                     configs_data[key] = df
-            except: pass
+            except Exception as e:
+                st.error(f"⚠️ Erro ao carregar aba '{nome}': {str(e)}")
             
         return configs_data, estoque_produtos
     except Exception as e:
+        st.error(f"❌ Erro geral ao carregar configurações: {str(e)}")
         return None, None
+
+def get_or_create_worksheet(ss, title, rows=1000, cols=20):
+    try:
+        return ss.worksheet(title)
+    except gspread.WorksheetNotFound:
+        return ss.add_worksheet(title, rows, cols)
 
 configs = {}
 ss = None
 estoque_produtos = set()
+
+# Botão para limpar cache
+with st.sidebar:
+    if st.button("🔄 Recarregar Configurações (Limpar Cache)"):
+        st.cache_data.clear()
+        st.rerun()
 
 try:
     ss, gc = conectar_google_sheets()
@@ -100,10 +129,10 @@ if configs:
     with col2:
         st.metric("Canais", len(configs.get('canais', [])))
     with col3:
-        if 'metas' in configs:
+        if 'metas' in configs and not configs['metas'].empty:
             st.metric("Margem Meta", configs['metas'].iloc[0]['Valor'])
     with col4:
-        if 'custos_ped' in configs:
+        if 'custos_ped' in configs and not configs['custos_ped'].empty:
             custo_emb = configs['custos_ped']['Custo Unitário (R$)'].sum()
             st.metric("Custo Embalagem", f"R$ {custo_emb:.2f}")
 
@@ -241,514 +270,121 @@ with st.sidebar:
                             prod_encontrado = True
                             break
                 
-                # Buscar em kits
+                # Se não achou, buscar em kits
                 if not prod_encontrado and not kits_df.empty:
-                    for _, k in kits_df.iterrows():
-                        if normalizar(k['Código Kit']) == prod_norm:
-                            tipo = 'Kit'
-                            comps = str(k.get('SKUs Componentes', '')).split(';')
-                            qtds_str = str(k.get('Qtd Componentes', '1')).split(';')
-                            qtds_comp = [int(q) if q.strip().isdigit() else 1 for q in qtds_str]
-                            for comp, q in zip(comps, qtds_comp):
-                                comp_norm = normalizar(comp)
-                                for _, p in produtos_df.iterrows():
-                                    if normalizar(p['Código']) == comp_norm:
-                                        custo_unit += (p.get('Custo (R$)', 0) or 0) * q
-                                        break
-                            break
+                    # Filtrar componentes do kit
+                    comps = kits_df[kits_df['Código Kit'].apply(normalizar) == prod_norm]
+                    if not comps.empty:
+                        tipo = 'Kit'
+                        custo_unit = 0
+                        for _, comp in comps.iterrows():
+                            cod_comp = comp['Código Componente']
+                            qtd_comp = comp['Quantidade']
+                            
+                            # Buscar custo do componente
+                            custo_comp = 0
+                            for _, p in produtos_df.iterrows():
+                                if normalizar(p['Código']) == normalizar(cod_comp):
+                                    custo_comp = p.get('Custo (R$)', 0) or 0
+                                    break
+                            custo_unit += custo_comp * qtd_comp
                 
-                custo_total = custo_unit * qtd
-                margem_bruta = total - custo_total
-                impostos = total * aliquota
-                taxa_total = (total * taxa_mp) + taxa_fixa + custo_emb
+                imposto = total * aliquota
+                taxa = (total * taxa_mp) + taxa_fixa
                 
-                # Rateio de Ads
-                rateio_ads = (total / total_vendas_dia * custo_ads) if total_vendas_dia > 0 else 0
+                # Rateio de Ads proporcional ao valor da venda
+                ads_rateio = 0
+                if total_vendas_dia > 0:
+                    ads_rateio = (total / total_vendas_dia) * custo_ads
                 
-                lucro = margem_bruta - impostos - taxa_total - rateio_ads
-                margem_pct = (lucro / total * 100) if total > 0 else 0
+                custo_total = (custo_unit * qtd) + custo_emb + imposto + taxa + ads_rateio
+                lucro = total - custo_total
+                margem = (lucro / total) * 100 if total > 0 else 0
                 
                 resultados.append({
-                    'Data': row.get('Data', ''),
+                    'Data': row['Data'],
+                    'Canal': row['Canal'],
+                    'CNPJ': row['CNPJ'],
                     'Produto': prod,
                     'Tipo': tipo,
-                    'Quantidade': qtd,
-                    'Total': total,
-                    'Custo_Total': custo_total,
-                    'Margem_Bruta': margem_bruta,
-                    'Impostos': impostos,
-                    'Ads_Campanhas': rateio_ads,
-                    'Lucro_Liquido': lucro,
-                    'Margem_%': margem_pct,
-                    'Canal': row['Canal'],
-                    'CNPJ': row['CNPJ']
+                    'Qtd': qtd,
+                    'Total Venda': total,
+                    'Custo Produto': custo_unit * qtd,
+                    'Custo Emb.': custo_emb,
+                    'Imposto': imposto,
+                    'Taxa MP': taxa,
+                    'Ads': ads_rateio,
+                    'Custo Total': custo_total,
+                    'Lucro Líquido': lucro,
+                    'Margem %': margem
                 })
             
             df_final = pd.DataFrame(resultados)
-            st.session_state['data_novo'] = df_final
-            st.success(f"✅ {len(df_final)} produtos processados!")
-            st.dataframe(df_final)
-        except Exception as e:
-            st.error(f"❌ {e}")
-    
-    btn_label = "🧪 Simular Envio" if modo_teste else "📤 Enviar para Google Sheets"
-    if st.button(btn_label) and 'data_novo' in st.session_state:
-        if modo_teste:
-            st.success("✅ SIMULAÇÃO: Dados processados!")
-            st.info("📊 Preview:")
-            st.dataframe(st.session_state['data_novo'])
-            st.warning("⚠️ Modo Teste - dados NÃO salvos")
-        else:
-            try:
-                df_novo = st.session_state['data_novo']
-                
-                # Função segura para obter ou criar aba (Listando todas primeiro)
-                def get_or_create_worksheet(ss, title, rows=100, cols=20):
+            
+            # Preencher NaN com 0 para evitar erro JSON
+            df_final = df_final.fillna(0)
+            
+            st.success("✅ Processamento concluído!")
+            st.dataframe(df_final.style.format({
+                'Total Venda': 'R$ {:.2f}',
+                'Custo Total': 'R$ {:.2f}',
+                'Lucro Líquido': 'R$ {:.2f}',
+                'Margem %': '{:.1f}%',
+                'Ads': 'R$ {:.2f}'
+            }))
+            
+            if not modo_teste:
+                # Salvar no Google Sheets
+                try:
+                    # 1. Dashboard Geral
+                    ws_dash = get_or_create_worksheet(ss, "1. Dashboard Geral")
+                    dados_existentes = ws_dash.get_all_values()
+                    novo_conteudo = df_final.values.tolist()
+                    
+                    if len(dados_existentes) <= 1:
+                        ws_dash.append_row(df_final.columns.tolist())
+                    
+                    ws_dash.append_rows(novo_conteudo)
+                    
+                    # 2. Análise por CNPJ
+                    ws_cnpj = get_or_create_worksheet(ss, "2. Análise por CNPJ")
+                    df_cnpj = df_final.groupby('CNPJ')[['Total Venda', 'Lucro Líquido']].sum().reset_index()
+                    df_cnpj['Margem Média %'] = (df_cnpj['Lucro Líquido'] / df_cnpj['Total Venda']) * 100
+                    ws_cnpj.clear()
+                    ws_cnpj.update([df_cnpj.columns.values.tolist()] + df_cnpj.fillna(0).values.tolist())
+                    
+                    # 3. Análise Executiva
+                    ws_exec = get_or_create_worksheet(ss, "3. Análise Executiva")
+                    df_exec = df_final.groupby('Canal')[['Total Venda', 'Lucro Líquido']].sum().reset_index()
+                    df_exec['Margem %'] = (df_exec['Lucro Líquido'] / df_exec['Total Venda']) * 100
+                    ws_exec.clear()
+                    ws_exec.update([df_exec.columns.values.tolist()] + df_exec.fillna(0).values.tolist())
+                    
+                    # 4. Preços Marketplaces
+                    ws_precos = get_or_create_worksheet(ss, "4. Preços Marketplaces")
+                    df_precos = df_final.groupby(['Produto', 'Canal'])['Total Venda'].mean().reset_index()
+                    ws_precos.clear()
+                    ws_precos.update([df_precos.columns.values.tolist()] + df_precos.fillna(0).values.tolist())
+                    
+                    # 6. Detalhes (com coluna Ads)
+                    ws_detalhes = get_or_create_worksheet(ss, "6. Detalhes")
+                    
+                    # Verificar se cabeçalho existe e tem Ads
+                    cabecalho_atual = []
                     try:
-                        # Listar títulos de todas as abas existentes
-                        worksheets = ss.worksheets()
-                        titles = [ws.title for ws in worksheets]
-                        
-                        if title in titles:
-                            return ss.worksheet(title)
-                        else:
-                            return ss.add_worksheet(title, rows, cols)
-                    except Exception as e:
-                        # Se falhar ao listar, tenta abrir direto (fallback)
-                        try:
-                            return ss.worksheet(title)
-                        except:
-                            # Se falhar ao abrir, tenta criar (último recurso)
-                            try:
-                                return ss.add_worksheet(title, rows, cols)
-                            except:
-                                # Se der erro que já existe, tenta abrir de novo (concorrência)
-                                return ss.worksheet(title)
-
-                # 6. Detalhes
-                sh = get_or_create_worksheet(ss, "6. Detalhes", 5000, 20)
-                
-                try:
-                    ex = sh.get_all_values()
-                    df_ex = pd.DataFrame(ex[1:], columns=ex[0]) if len(ex) > 1 else pd.DataFrame()
-                    for c in ['Quantidade','Total','Custo_Total','Margem_Bruta','Lucro_Liquido','Impostos']:
-                        if c in df_ex.columns:
-                            df_ex[c] = pd.to_numeric(df_ex[c], errors='coerce')
-                except:
-                    df_ex = pd.DataFrame()
-
-                # Forçar atualização do cabeçalho se as colunas mudaram
-                if not df_ex.empty and 'Ads_Campanhas' not in df_ex.columns and 'Ads_Campanhas' in df_novo.columns:
-                    sh.clear()
-                    df_ex['Ads_Campanhas'] = 0
-                    df_full = pd.concat([df_ex, df_novo], ignore_index=True)
-                    dados_finais = [df_full.columns.tolist()] + df_full.astype(str).values.tolist()
-                    sh.update('A1', dados_finais)
-                else:
-                    if df_ex.empty:
-                        sh.clear()
-                        dados_finais = [df_novo.columns.tolist()] + df_novo.astype(str).values.tolist()
-                        sh.update('A1', dados_finais)
-                    else:
-                        novas_linhas = df_novo.astype(str).values.tolist()
-                        sh.append_rows(novas_linhas)
-                
-                df_full = pd.concat([df_ex, df_novo], ignore_index=True) if not df_ex.empty else df_novo
-                df_full = df_full.fillna(0)  # Substituir NaN por 0 para evitar erro JSON
-                
-                agg = {'Quantidade':'sum','Total':'sum','Custo_Total':'sum','Margem_Bruta':'sum','Lucro_Liquido':'sum'}
-                if 'Impostos' in df_full.columns:
-                    agg['Impostos'] = 'sum'
-                
-                prods = df_full.groupby('Produto').agg(agg).reset_index()
-                total = prods['Total'].sum()
-                prods['Part%'] = (prods['Total']/total)*100
-                
-                med_q = prods['Quantidade'].median()
-                med_p = prods['Part%'].median()
-                
-                def bcg(r):
-                    if r['Quantidade'] >= med_q and r['Part%'] >= med_p: return 'Estrela'
-                    elif r['Quantidade'] < med_q and r['Part%'] >= med_p: return 'Vaca Leiteira'
-                    elif r['Quantidade'] >= med_q and r['Part%'] < med_p: return 'Interrogação'
-                    else: return 'Abacaxi'
-                
-                prods['BCG'] = prods.apply(bcg, axis=1)
-                
-                sh1 = get_or_create_worksheet(ss, "1. Dashboard Geral", 100, 5)
-                
-                dias = len(df_full['Data'].unique()) if 'Data' in df_full.columns else 1
-                lucro = prods['Lucro_Liquido'].sum()
-                margem = prods['Margem_Bruta'].sum()
-                impostos_total = prods['Impostos'].sum() if 'Impostos' in prods.columns else 0
-                
-                d1 = [['DASHBOARD GERAL'],
-                      [datetime.now().strftime("%d/%m/%Y %H:%M")], [],
-                      ['Dias', dias],
-                      ['Faturamento', f'R$ {total:,.2f}'],
-                      ['Margem Bruta', f'R$ {margem:,.2f}'],
-                      ['Impostos', f'R$ {impostos_total:,.2f}'],
-                      ['Lucro Líquido', f'R$ {lucro:,.2f}'],
-                      ['Margem %', f'{(lucro/total*100):.1f}%'],
-                      ['Produtos', len(prods)], [],
-                      ['BCG', 'Qtd', 'Faturamento', 'Lucro']]
-                
-                for cat in ['Estrela', 'Vaca Leiteira', 'Interrogação', 'Abacaxi']:
-                    pc = prods[prods['BCG'] == cat]
-                    lc = pc['Lucro_Liquido'].sum()
-                    d1.append([cat, len(pc), f'R$ {pc["Total"].sum():,.2f}', f'R$ {lc:,.2f}'])
-                
-                sh1.clear()
-                sh1.update('A1', d1)
-                
-                if 'CNPJ' in df_full.columns:
-                    sh_cnpj = get_or_create_worksheet(ss, "2. Por CNPJ", 100, 8)
+                        cabecalho_atual = ws_detalhes.row_values(1)
+                    except: pass
                     
-                    cnpj_agg = df_full.groupby('CNPJ').agg({
-                        'Total': 'sum', 'Custo_Total': 'sum', 'Margem_Bruta': 'sum',
-                        'Impostos': 'sum', 'Lucro_Liquido': 'sum'
-                    }).reset_index()
+                    if not cabecalho_atual or 'Ads' not in cabecalho_atual:
+                        ws_detalhes.clear()
+                        ws_detalhes.append_row(df_final.columns.tolist())
                     
-                    cnpj_agg['Margem %'] = (cnpj_agg['Lucro_Liquido'] / cnpj_agg['Total'] * 100).fillna(0)
+                    ws_detalhes.append_rows(novo_conteudo)
                     
-                    d_cnpj = [['ANÁLISE POR CNPJ/REGIME'], [],
-                              ['Regime', 'Faturamento', 'Custo', 'Margem Bruta', 'Impostos', 'Lucro Líquido', 'Margem %']]
+                    st.toast("💾 Dados salvos no Google Sheets com sucesso!", icon="✅")
                     
-                    for _, row in cnpj_agg.iterrows():
-                        d_cnpj.append([row['CNPJ'], f"R$ {row['Total']:,.2f}", f"R$ {row['Custo_Total']:,.2f}",
-                                       f"R$ {row['Margem_Bruta']:,.2f}", f"R$ {row['Impostos']:,.2f}",
-                                       f"R$ {row['Lucro_Liquido']:,.2f}", f"{row['Margem %']:.1f}%"])
-                    
-                    sh_cnpj.clear()
-                    sh_cnpj.update('A1', d_cnpj)
-                
-                sh_exec = get_or_create_worksheet(ss, "3. Análise Executiva", 200, 6)
-                
-                margem_media = (lucro / total * 100) if total > 0 else 0
-                produtos_prejuizo = len(prods[prods['Lucro_Liquido'] <= 0])
-                
-                def semaforo(valor, meta_min, meta_ideal):
-                    if valor >= meta_ideal: return '🟢'
-                    elif valor >= meta_min: return '🟡'
-                    else: return '🔴'
-                
-                top5 = prods.nlargest(5, 'Lucro_Liquido')[['Produto', 'Lucro_Liquido', 'BCG']]
-                bottom5 = prods.nsmallest(5, 'Lucro_Liquido')[['Produto', 'Lucro_Liquido', 'BCG']]
-                
-                recomendacoes = []
-                if produtos_prejuizo > 0:
-                    recomendacoes.append(f"⚠️ {produtos_prejuizo} produtos em prejuízo")
-                
-                abacaxis = prods[prods['BCG'] == 'Abacaxi']
-                if len(abacaxis) > 0:
-                    recomendacoes.append(f"🗑️ {len(abacaxis)} produtos 'Abacaxi'")
-                
-                estrelas = prods[prods['BCG'] == 'Estrela']
-                if len(estrelas) > 0:
-                    recomendacoes.append(f"⭐ {len(estrelas)} produtos 'Estrela'")
-                
-                d_exec = [['ANÁLISE EXECUTIVA'], [datetime.now().strftime("%d/%m/%Y %H:%M")], [],
-                          ['Indicador', 'Valor', 'Status'],
-                          ['Margem Líquida', f'{margem_media:.1f}%', semaforo(margem_media, 10, 15)],
-                          ['Lucro Líquido', f'R$ {lucro:,.2f}', '🟢' if lucro > 0 else '🔴'], [],
-                          ['TOP 5 LUCRATIVOS'], ['Produto', 'Lucro', 'BCG']]
-                
-                for _, p in top5.iterrows():
-                    d_exec.append([p['Produto'], f"R$ {p['Lucro_Liquido']:,.2f}", p['BCG']])
-                
-                d_exec.extend([[], ['TOP 5 MENOS LUCRATIVOS'], ['Produto', 'Lucro', 'BCG']])
-                for _, p in bottom5.iterrows():
-                    d_exec.append([p['Produto'], f"R$ {p['Lucro_Liquido']:,.2f}", p['BCG']])
-                
-                d_exec.extend([[], ['RECOMENDAÇÕES']])
-                for rec in recomendacoes:
-                    d_exec.append([rec])
-                
-                sh_exec.clear()
-                sh_exec.update('A1', d_exec)
-                
-                # === ABA PREÇOS MARKETPLACES ===
-                try:
-                    sh_precos = ss.worksheet("4. Preços Marketplaces")
-                except:
-                    sh_precos = ss.add_worksheet("4. Preços Marketplaces", 1000, 20)
-                
-                # Ler preços existentes ou criar novo
-                try:
-                    precos_ex = sh_precos.get_all_values()
-                    df_precos = pd.DataFrame(precos_ex[1:], columns=precos_ex[0]) if len(precos_ex) > 1 else pd.DataFrame()
-                except:
-                    df_precos = pd.DataFrame()
-                
-                # Calcular preço real por produto/canal
-                canal_atual = df_novo['Canal'].iloc[0] if len(df_novo) > 0 else 'Geral'
-                
-                # Mapear canal para coluna
-                canal_map = {
-                    '📊 Vendas Gerais': 'Geral',
-                    '🛒 Mercado Livre': 'ML',
-                    '🛍️ Shopee Matriz': 'Shopee_Matriz',
-                    '🏪 Shopee 1:50': 'Shopee_150',
-                    '👗 Shein': 'Shein'
-                }
-                col_canal = canal_map.get(canal_atual, 'Geral')
-                
-                # Agregar por produto para obter preço médio real
-                preco_real = df_novo.groupby('Produto').agg({
-                    'Total': 'sum', 'Quantidade': 'sum'
-                }).reset_index()
-                preco_real['Preco_Unit'] = preco_real['Total'] / preco_real['Quantidade']
-                
-                # Obter custos dos produtos
-                produtos_df = st.session_state.get('produtos', pd.DataFrame())
-                canais_df = st.session_state.get('canais', pd.DataFrame())
-                
-                # Obter taxa do canal
-                taxa_canal = 0.16
-                if not canais_df.empty:
-                    for _, c in canais_df.iterrows():
-                        if col_canal.lower() in str(c.get('Canal', '')).lower():
-                            taxa_canal = c.get('Taxa Marketplace (%)', 16) / 100
-                            break
-                
-                # Criar/atualizar tabela de preços
-                colunas_precos = ['Código', 'Custo (R$)', 'ML', 'M.C ML', 'Shopee_Matriz', 'M.C SM', 'Shopee_150', 'M.C S150', 'Shein', 'M.C Shein', 'Ecommerce', 'M.C Ecom', 'Média M.C']
-                
-                if df_precos.empty:
-                    df_precos = pd.DataFrame(columns=colunas_precos)
-                
-                # Atualizar preços para o canal atual
-                for _, row in preco_real.iterrows():
-                    prod = row['Produto']
-                    preco = row['Preco_Unit']
-                    
-                    # Buscar custo
-                    custo = 0
-                    prod_norm = normalizar(prod)
-                    if not produtos_df.empty:
-                        for _, p in produtos_df.iterrows():
-                            if normalizar(p['Código']) == prod_norm:
-                                custo = p.get('Custo (R$)', 0) or 0
-                                break
-                    
-                    # Calcular M.C = (Preço - Custo - Taxas) / Preço * 100
-                    mc = ((preco - custo - (preco * taxa_canal)) / preco * 100) if preco > 0 else 0
-                    
-                    # Verificar se produto já existe na tabela
-                    if prod in df_precos['Código'].values:
-                        idx = df_precos[df_precos['Código'] == prod].index[0]
-                        df_precos.loc[idx, col_canal] = preco
-                        df_precos.loc[idx, f'M.C {col_canal[:2]}'] = mc
-                    else:
-                        nova_linha = {c: '' for c in colunas_precos}
-                        nova_linha['Código'] = prod
-                        nova_linha['Custo (R$)'] = custo
-                        nova_linha[col_canal] = preco
-                        # Encontrar coluna M.C correta
-                        mc_cols = {'ML': 'M.C ML', 'Shopee_Matriz': 'M.C SM', 'Shopee_150': 'M.C S150', 'Shein': 'M.C Shein', 'Ecommerce': 'M.C Ecom'}
-                        if col_canal in mc_cols:
-                            nova_linha[mc_cols[col_canal]] = mc
-                        df_precos = pd.concat([df_precos, pd.DataFrame([nova_linha])], ignore_index=True)
-                
-                # Calcular Média M.C para cada produto
-                mc_colunas = ['M.C ML', 'M.C SM', 'M.C S150', 'M.C Shein', 'M.C Ecom']
-                for idx, row in df_precos.iterrows():
-                    mcs = []
-                    for mc_col in mc_colunas:
-                        if mc_col in df_precos.columns:
-                            val = row.get(mc_col, '')
-                            if val != '' and pd.notna(val):
-                                try:
-                                    mcs.append(float(val))
-                                except: pass
-                    df_precos.loc[idx, 'Média M.C'] = sum(mcs) / len(mcs) if mcs else 0
-                
-                # Formatar e enviar
-                d_precos = [colunas_precos]
-                for _, row in df_precos.iterrows():
-                    linha = []
-                    for col in colunas_precos:
-                        val = row.get(col, '')
-                        if 'R$' in col or col in ['ML', 'Shopee_Matriz', 'Shopee_150', 'Shein', 'Ecommerce', 'Custo (R$)']:
-                            linha.append(f'R$ {float(val):.2f}' if val != '' and pd.notna(val) else '')
-                        elif 'M.C' in col or 'Média' in col:
-                            linha.append(f'{float(val):.1f}%' if val != '' and pd.notna(val) else '')
-                        else:
-                            linha.append(str(val))
-                    d_precos.append(linha)
-                
-                sh_precos.clear()
-                sh_precos.update('A1', d_precos)
-                
-                # === FIM ABA PREÇOS MARKETPLACES ===
-                
-                cols = ['Data', 'Produto', 'Tipo', 'Qtd', 'Total', 'Custo', 'Lucro', 'Margem%', 'Canal', 'CNPJ', 'BCG']
-                d6 = [cols]
-                for _, r in df_full.iterrows():
-                    cat = prods[prods['Produto'] == r['Produto']]['BCG'].values[0] if r['Produto'] in prods['Produto'].values else 'N/A'
-                    d6.append([str(r.get('Data', '')), r['Produto'], r.get('Tipo', ''), int(r['Quantidade']),
-                               float(r['Total']), float(r.get('Custo_Total', 0)), float(r.get('Lucro_Liquido', 0)),
-                               f"{r.get('Margem_%', 0):.1f}%", r.get('Canal', ''), r.get('CNPJ', ''), cat])
-                
-                sh.clear()
-                sh.update('A1', d6)
-                
-                st.success(f"✅ {len(df_full)} registros | Lucro: R$ {lucro:,.2f}")
-                st.info(f"🔗 [Abrir Google Sheets]({st.secrets['GOOGLE_SHEETS_URL']})")
-            except Exception as e:
-                st.error(f"❌ {e}")
-
-# === FUNÇÃO GERAR RELATÓRIO EXCEL ===
-def gerar_relatorio_excel(df_dados, titulo, canais_df, produtos_df):
-    """Gera relatório Excel com múltiplas abas"""
-    output = io.BytesIO()
-    
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # ABA 1: DASHBOARD
-        total_fat = df_dados['Total'].sum()
-        total_lucro = df_dados['Lucro_Liquido'].sum() if 'Lucro_Liquido' in df_dados.columns else 0
-        total_custo = df_dados['Custo_Total'].sum() if 'Custo_Total' in df_dados.columns else 0
-        margem_pct = (total_lucro / total_fat * 100) if total_fat > 0 else 0
+                except Exception as e:
+                    st.error(f"❌ Erro ao salvar no Google Sheets: {str(e)}")
         
-        dash = pd.DataFrame({
-            'Indicador': ['Faturamento Total', 'Custo Total', 'Lucro Líquido', 'Margem %', 'Produtos Vendidos', 'Quantidade Total'],
-            'Valor': [f'R$ {total_fat:,.2f}', f'R$ {total_custo:,.2f}', f'R$ {total_lucro:,.2f}', f'{margem_pct:.1f}%', len(df_dados['Produto'].unique()), int(df_dados['Quantidade'].sum())]
-        })
-        dash.to_excel(writer, sheet_name='Dashboard', index=False)
-        
-        # ABA 2: BCG POR CANAL
-        bcg_canal = []
-        for canal in df_dados['Canal'].unique():
-            df_canal = df_dados[df_dados['Canal'] == canal]
-            prods_canal = df_canal.groupby('Produto').agg({'Quantidade':'sum','Total':'sum','Lucro_Liquido':'sum'}).reset_index()
-            total_canal = prods_canal['Total'].sum()
-            prods_canal['Part%'] = (prods_canal['Total']/total_canal)*100 if total_canal > 0 else 0
-            med_q = prods_canal['Quantidade'].median()
-            med_p = prods_canal['Part%'].median()
-            for _, r in prods_canal.iterrows():
-                if r['Quantidade'] >= med_q and r['Part%'] >= med_p: bcg = 'Estrela'
-                elif r['Quantidade'] < med_q and r['Part%'] >= med_p: bcg = 'Vaca Leiteira'
-                elif r['Quantidade'] >= med_q and r['Part%'] < med_p: bcg = 'Interrogação'
-                else: bcg = 'Abacaxi'
-                bcg_canal.append({'Canal': canal, 'Produto': r['Produto'], 'Qtd': r['Quantidade'], 'Faturamento': r['Total'], 'Lucro': r['Lucro_Liquido'], 'BCG': bcg})
-        
-        df_bcg = pd.DataFrame(bcg_canal)
-        if not df_bcg.empty:
-            df_bcg.to_excel(writer, sheet_name='BCG por Canal', index=False)
-        
-        # ABA 2B: BCG GERAL (TODOS OS CANAIS CONSOLIDADOS)
-        prods_geral = df_dados.groupby('Produto').agg({'Quantidade':'sum','Total':'sum','Lucro_Liquido':'sum'}).reset_index()
-        total_geral = prods_geral['Total'].sum()
-        prods_geral['Part%'] = (prods_geral['Total']/total_geral)*100 if total_geral > 0 else 0
-        med_q_geral = prods_geral['Quantidade'].median()
-        med_p_geral = prods_geral['Part%'].median()
-        
-        bcg_geral = []
-        for _, r in prods_geral.iterrows():
-            if r['Quantidade'] >= med_q_geral and r['Part%'] >= med_p_geral: bcg = 'Estrela'
-            elif r['Quantidade'] < med_q_geral and r['Part%'] >= med_p_geral: bcg = 'Vaca Leiteira'
-            elif r['Quantidade'] >= med_q_geral and r['Part%'] < med_p_geral: bcg = 'Interrogação'
-            else: bcg = 'Abacaxi'
-            bcg_geral.append({'Produto': r['Produto'], 'Qtd': r['Quantidade'], 'Faturamento': f"R$ {r['Total']:,.2f}", 'Lucro': f"R$ {r['Lucro_Liquido']:,.2f}", 'Part%': f"{r['Part%']:.1f}%", 'BCG': bcg})
-        
-        df_bcg_geral = pd.DataFrame(bcg_geral)
-        if not df_bcg_geral.empty:
-            # Resumo BCG Geral
-            resumo_bcg = df_bcg_geral.groupby('BCG').size().reset_index(name='Quantidade')
-            resumo_bcg.to_excel(writer, sheet_name='BCG Geral Resumo', index=False)
-            df_bcg_geral.to_excel(writer, sheet_name='BCG Geral Detalhado', index=False)
-        
-        # ABA 3: MARGENS POR PRODUTO/CANAL
-        margens = df_dados.groupby(['Canal', 'Produto']).agg({
-            'Total': 'sum', 'Custo_Total': 'sum', 'Lucro_Liquido': 'sum', 'Quantidade': 'sum'
-        }).reset_index()
-        margens['M.C (R$)'] = margens['Lucro_Liquido']
-        margens['M.C (%)'] = (margens['Lucro_Liquido'] / margens['Total'] * 100).round(1)
-        margens = margens.rename(columns={'Total': 'Faturamento (R$)', 'Custo_Total': 'Custo (R$)', 'Lucro_Liquido': 'Lucro (R$)'})
-        margens.to_excel(writer, sheet_name='Margens', index=False)
-        
-        # ABA 4: RECOMENDAÇÕES POR CANAL
-        recomendacoes = []
-        for canal in df_dados['Canal'].unique():
-            df_canal = df_dados[df_dados['Canal'] == canal]
-            fat_canal = df_canal['Total'].sum()
-            lucro_canal = df_canal['Lucro_Liquido'].sum() if 'Lucro_Liquido' in df_canal.columns else 0
-            margem_canal = (lucro_canal / fat_canal * 100) if fat_canal > 0 else 0
-            
-            # Produtos estrela do canal
-            prods_canal = df_canal.groupby('Produto').agg({'Total':'sum','Lucro_Liquido':'sum'}).reset_index()
-            top_lucro = prods_canal.nlargest(3, 'Lucro_Liquido')['Produto'].tolist()
-            piores = prods_canal[prods_canal['Lucro_Liquido'] <= 0]['Produto'].tolist()[:3]
-            
-            dica = ''
-            if margem_canal < 10:
-                dica = f'⚠️ ALERTA: Margem baixa ({margem_canal:.1f}%). Revisar preços ou custos.'
-            elif margem_canal < 20:
-                dica = f'🟡 ATENÇÃO: Margem moderada ({margem_canal:.1f}%). Oportunidade de otimização.'
-            else:
-                dica = f'✅ BOM: Margem saudável ({margem_canal:.1f}%). Manter estratégia.'
-            
-            recomendacoes.append({
-                'Canal': canal,
-                'Faturamento': f'R$ {fat_canal:,.2f}',
-                'Lucro': f'R$ {lucro_canal:,.2f}',
-                'Margem %': f'{margem_canal:.1f}%',
-                'Top 3 Lucrativos': ', '.join(top_lucro),
-                'Produtos em Prejuízo': ', '.join(piores) if piores else 'Nenhum',
-                'Recomendação': dica
-            })
-        
-        df_rec = pd.DataFrame(recomendacoes)
-        df_rec.to_excel(writer, sheet_name='Recomendações', index=False)
-    
-    output.seek(0)
-    return output
-
-# === BOTÕES DE DOWNLOAD ===
-if 'data_novo' in st.session_state and configs:
-    st.divider()
-    st.subheader("📊 Relatórios para Download")
-    
-    col_dl1, col_dl2 = st.columns(2)
-    
-    df_atual = st.session_state['data_novo']
-    produtos_df = st.session_state.get('produtos', pd.DataFrame())
-    canais_df = st.session_state.get('canais', pd.DataFrame())
-    
-    # Botão 1: Relatório do Dia
-    with col_dl1:
-        if 'Lucro_Liquido' in df_atual.columns:
-            excel_dia = gerar_relatorio_excel(df_atual, 'Relatório do Dia', canais_df, produtos_df)
-            data_rel = df_atual['Data'].iloc[0] if 'Data' in df_atual.columns else datetime.now().strftime('%Y-%m-%d')
-            st.download_button(
-                label="📅 Baixar Relatório do Dia",
-                data=excel_dia,
-                file_name=f"relatorio_dia_{data_rel}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-    
-    # Botão 2: Relatório Geral (se houver dados históricos)
-    with col_dl2:
-        try:
-            sh_det = ss.worksheet("6. Detalhes")
-            dados_hist = sh_det.get_all_values()
-            if len(dados_hist) > 1:
-                df_hist = pd.DataFrame(dados_hist[1:], columns=dados_hist[0])
-                for c in ['Quantidade','Total','Custo','Lucro']:
-                    if c in df_hist.columns:
-                        df_hist[c] = pd.to_numeric(df_hist[c].apply(lambda x: str(x).replace(',', '.')), errors='coerce')
-                df_hist = df_hist.rename(columns={'Custo': 'Custo_Total', 'Lucro': 'Lucro_Liquido', 'Qtd': 'Quantidade'})
-                df_hist = df_hist.fillna(0)
-                
-                excel_geral = gerar_relatorio_excel(df_hist, 'Relatório Geral', canais_df, produtos_df)
-                st.download_button(
-                    label="📊 Baixar Relatório Geral",
-                    data=excel_geral,
-                    file_name=f"relatorio_geral_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-        except:
-            st.info("📝 Envie dados para gerar relatório geral")
-
-if not configs:
-    st.info("👈 Configure a planilha Google Sheets primeiro")
+        except Exception as e:
+            st.error(f"❌ Erro no processamento: {str(e)}")
