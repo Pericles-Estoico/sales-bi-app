@@ -9,7 +9,7 @@ import io
 import time
 
 # ==============================================================================
-# VERSÃO V24 - METAS INTEGRADAS E RANKING NUMÉRICO
+# VERSÃO V25 - DIAGNÓSTICO DE CONEXÃO
 # CORREÇÕES ACUMULADAS:
 # 1. Autenticação restaurada
 # 2. Matriz BCG implementada (Geral e Por Canal)
@@ -30,8 +30,9 @@ import time
 # 17. Formatação forçada de R$ na aba de preços
 # 18. Ordenação BCG (Vaca -> Estrela -> Interrogação -> Abacaxi)
 # 19. Bloqueio Total de Salvamento (Segurança)
-# 20. NOVO: Integração com aba 'Metas' (Indicadores Visuais)
-# 21. NOVO: Coluna de Ranking Numérico (1º, 2º, 3º...)
+# 20. Integração com aba 'Metas' (Indicadores Visuais)
+# 21. Coluna de Ranking Numérico (1º, 2º, 3º...)
+# 22. NOVO: Painel de Diagnóstico (Nome da Planilha + Contagem de Registros)
 # ==============================================================================
 
 # ==============================================================================
@@ -403,7 +404,6 @@ try:
         for key, df in configs.items(): st.session_state[key] = df
         st.session_state['estoque_produtos'] = estoque_produtos
         
-        # Carregar Metas
         if 'metas' in configs and not configs['metas'].empty:
             for _, row in configs['metas'].iterrows():
                 try:
@@ -413,9 +413,25 @@ except Exception as e:
     st.error(f"Erro conexão: {e}")
     st.stop()
 
-st.title("📊 Sales BI Pro - Dashboard Executivo V24")
+st.title("📊 Sales BI Pro - Dashboard Executivo V25")
 
 with st.sidebar:
+    st.header("🔌 Status da Conexão")
+    if ss:
+        st.success(f"Conectado a: **{ss.title}**")
+        
+        qtd_prod = len(st.session_state.get('produtos', []))
+        qtd_kits = len(st.session_state.get('kits', []))
+        
+        if qtd_prod > 0: st.info(f"📦 Produtos Carregados: {qtd_prod}")
+        else: st.error("❌ Nenhum Produto encontrado! Verifique a aba 'Produtos'.")
+        
+        if qtd_kits > 0: st.info(f"🧩 Kits Carregados: {qtd_kits}")
+        else: st.warning("⚠️ Nenhum Kit encontrado (ou aba 'Kits' vazia).")
+    else:
+        st.error("❌ Desconectado")
+
+    st.divider()
     st.header("📥 Importar Vendas")
     
     if st.button("🔄 Atualizar Dados (Limpar Cache)"):
@@ -518,9 +534,9 @@ if not df_detalhes.empty and 'Total Venda' in df_detalhes.columns:
         
         delta_color = "normal"
         if metas_dict:
-            if margem_media >= metas_dict.get('Margem Líquida Ideal (%)', 15)/100: delta_color = "normal" # Verde (padrão positivo)
-            elif margem_media < metas_dict.get('Margem Líquida Mínima (%)', 10)/100: delta_color = "inverse" # Vermelho
-            else: delta_color = "off" # Cinza/Amarelo
+            if margem_media >= metas_dict.get('Margem Líquida Ideal (%)', 15)/100: delta_color = "normal"
+            elif margem_media < metas_dict.get('Margem Líquida Mínima (%)', 10)/100: delta_color = "inverse"
+            else: delta_color = "off"
             
         col2.metric("Margem Média", format_percent_br(margem_media), delta_color=delta_color)
         
