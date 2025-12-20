@@ -9,7 +9,7 @@ import io
 import time
 
 # ==============================================================================
-# VERSÃO V25 - DIAGNÓSTICO DE CONEXÃO
+# VERSÃO V26 - TICKET MÉDIO + DIAGNÓSTICO
 # CORREÇÕES ACUMULADAS:
 # 1. Autenticação restaurada
 # 2. Matriz BCG implementada (Geral e Por Canal)
@@ -32,7 +32,8 @@ import time
 # 19. Bloqueio Total de Salvamento (Segurança)
 # 20. Integração com aba 'Metas' (Indicadores Visuais)
 # 21. Coluna de Ranking Numérico (1º, 2º, 3º...)
-# 22. NOVO: Painel de Diagnóstico (Nome da Planilha + Contagem de Registros)
+# 22. Painel de Diagnóstico (Nome da Planilha + Contagem de Registros)
+# 23. NOVO: Indicador de Ticket Médio na Visão Geral
 # ==============================================================================
 
 # ==============================================================================
@@ -413,7 +414,7 @@ except Exception as e:
     st.error(f"Erro conexão: {e}")
     st.stop()
 
-st.title("📊 Sales BI Pro - Dashboard Executivo V25")
+st.title("📊 Sales BI Pro - Dashboard Executivo V26")
 
 with st.sidebar:
     st.header("🔌 Status da Conexão")
@@ -528,17 +529,26 @@ if not df_detalhes.empty and 'Total Venda' in df_detalhes.columns:
     with tab1:
         total_venda = df_detalhes['Total Venda'].sum()
         margem_media = df_detalhes['Margem (%)'].mean()
+        ticket_medio = df_detalhes['Total Venda'].mean() # Média por linha de venda
         
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         col1.metric("Vendas Totais", format_currency_br(total_venda))
         
-        delta_color = "normal"
+        delta_color_margem = "normal"
         if metas_dict:
-            if margem_media >= metas_dict.get('Margem Líquida Ideal (%)', 15)/100: delta_color = "normal"
-            elif margem_media < metas_dict.get('Margem Líquida Mínima (%)', 10)/100: delta_color = "inverse"
-            else: delta_color = "off"
+            if margem_media >= metas_dict.get('Margem Líquida Ideal (%)', 15)/100: delta_color_margem = "normal"
+            elif margem_media < metas_dict.get('Margem Líquida Mínima (%)', 10)/100: delta_color_margem = "inverse"
+            else: delta_color_margem = "off"
             
-        col2.metric("Margem Média", format_percent_br(margem_media), delta_color=delta_color)
+        col2.metric("Margem Média", format_percent_br(margem_media), delta_color=delta_color_margem)
+        
+        delta_color_ticket = "normal"
+        if metas_dict:
+            if ticket_medio >= metas_dict.get('Ticket Médio Ideal (R$)', 60): delta_color_ticket = "normal"
+            elif ticket_medio < metas_dict.get('Ticket Médio Mínimo (R$)', 45): delta_color_ticket = "inverse"
+            else: delta_color_ticket = "off"
+            
+        col3.metric("Ticket Médio (Linha)", format_currency_br(ticket_medio), delta_color=delta_color_ticket)
         
         st.bar_chart(df_detalhes.groupby('Canal')['Total Venda'].sum())
         st.download_button("📥 Baixar Resumo Geral", data=to_excel(d_geral), file_name="resumo_geral.xlsx")
