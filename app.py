@@ -9,7 +9,7 @@ import io
 import time
 
 # ==============================================================================
-# VERSÃO V23 - SEGURANÇA TOTAL (BLOQUEIO DE ERROS)
+# VERSÃO V24 - METAS INTEGRADAS E RANKING NUMÉRICO
 # CORREÇÕES ACUMULADAS:
 # 1. Autenticação restaurada
 # 2. Matriz BCG implementada (Geral e Por Canal)
@@ -29,7 +29,9 @@ import time
 # 16. Tratamento de 'nan' na aba de preços (substituído por '-')
 # 17. Formatação forçada de R$ na aba de preços
 # 18. Ordenação BCG (Vaca -> Estrela -> Interrogação -> Abacaxi)
-# 19. NOVO: BLOQUEIO TOTAL DE SALVAMENTO SE HOUVER ERRO DE CUSTO OU PRODUTO
+# 19. Bloqueio Total de Salvamento (Segurança)
+# 20. NOVO: Integração com aba 'Metas' (Indicadores Visuais)
+# 21. NOVO: Coluna de Ranking Numérico (1º, 2º, 3º...)
 # ==============================================================================
 
 # ==============================================================================
@@ -206,6 +208,16 @@ def classificar_bcg(row, median_vendas, median_margem):
     elif vendas < median_vendas and margem >= median_margem: return 'Interrogação ❓'
     else: return 'Abacaxi 🍍'
 
+def obter_status_meta(margem, metas):
+    try:
+        minima = float(metas.get('Margem Líquida Mínima (%)', 10)) / 100
+        ideal = float(metas.get('Margem Líquida Ideal (%)', 15)) / 100
+        
+        if margem >= ideal: return '🟢 Ideal'
+        elif margem >= minima: return '🟡 Atenção'
+        else: return '🔴 Crítico'
+    except: return '⚪ N/A'
+
 def processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads_total):
     df_novo = pd.DataFrame()
     if 'Código' in df_orig.columns and 'Quantidade' in df_orig.columns:
@@ -302,7 +314,6 @@ def processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads_total):
         
         if not encontrado:
             faltantes.append({'Código': prod_cod, 'Motivo': erro_motivo})
-            # Se não encontrou ou tem erro, NÃO calcula o resto, pois vai travar o salvamento
             continue
 
         custo_total_prod = custo_produto * qtd
@@ -325,7 +336,7 @@ def processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads_total):
         
     return pd.DataFrame(resultados), pd.DataFrame(faltantes)
 
-def atualizar_dashboards_resumo(df_detalhes):
+def atualizar_dashboards_resumo(df_detalhes, metas_dict):
     if df_detalhes.empty: return None, None, None, None, None
     
     cols_req = ['Canal', 'Total Venda', 'Lucro Bruto', 'Quantidade', 'Margem (%)', 'CNPJ', 'Produto']
@@ -334,6 +345,7 @@ def atualizar_dashboards_resumo(df_detalhes):
     dash_geral = df_detalhes.groupby('Canal').agg({
         'Total Venda': 'sum', 'Lucro Bruto': 'sum', 'Quantidade': 'sum', 'Margem (%)': 'mean'
     }).reset_index()
+    dash_geral['Status Meta'] = dash_geral['Margem (%)'].apply(lambda x: obter_status_meta(x, metas_dict))
     
     dash_cnpj = df_detalhes.groupby(['CNPJ', 'Canal']).agg({
         'Total Venda': 'sum', 'Lucro Bruto': 'sum', 'Margem (%)': 'mean'
@@ -345,9 +357,11 @@ def atualizar_dashboards_resumo(df_detalhes):
     med_v = dash_exec['Total Venda'].median()
     med_m = dash_exec['Margem (%)'].median()
     dash_exec['Classificação BCG'] = dash_exec.apply(lambda x: classificar_bcg(x, med_v, med_m), axis=1)
+    dash_exec['Status Meta'] = dash_exec['Margem (%)'].apply(lambda x: obter_status_meta(x, metas_dict))
     
     dash_exec['Classificação BCG'] = pd.Categorical(dash_exec['Classificação BCG'], categories=ORDEM_BCG, ordered=True)
-    dash_exec = dash_exec.sort_values('Classificação BCG')
+    dash_exec = dash_exec.sort_values(['Classificação BCG', 'Total Venda'], ascending=[True, False])
+    dash_exec.insert(0, 'Ranking', range(1, len(dash_exec) + 1))
     
     dash_bcg_canal = df_detalhes.groupby(['Canal', 'Produto']).agg({
         'Total Venda': 'sum', 'Margem (%)': 'mean', 'Quantidade': 'sum'
@@ -358,12 +372,17 @@ def atualizar_dashboards_resumo(df_detalhes):
         med_v_c = subset['Total Venda'].median()
         med_m_c = subset['Margem (%)'].median()
         subset['Classificação'] = subset.apply(lambda x: classificar_bcg(x, med_v_c, med_m_c), axis=1)
+        subset['Status Meta'] = subset['Margem (%)'].apply(lambda x: obter_status_meta(x, metas_dict))
+        
+        subset['Classificação'] = pd.Categorical(subset['Classificação'], categories=ORDEM_BCG, ordered=True)
+        subset = subset.sort_values(['Classificação', 'Total Venda'], ascending=[True, False])
+        subset.insert(0, 'Ranking', range(1, len(subset) + 1))
+        
         bcg_final.append(subset)
     
     df_bcg_final = pd.concat(bcg_final) if bcg_final else pd.DataFrame()
     if not df_bcg_final.empty:
-        df_bcg_final['Classificação'] = pd.Categorical(df_bcg_final['Classificação'], categories=ORDEM_BCG, ordered=True)
-        df_bcg_final = df_bcg_final.sort_values(['Canal', 'Classificação'])
+        df_bcg_final = df_bcg_final.sort_values(['Canal', 'Ranking'])
 
     df_precos = df_detalhes.groupby(['Produto', 'Canal']).agg({
         'Total Venda': 'sum', 'Quantidade': 'sum'
@@ -379,14 +398,22 @@ def atualizar_dashboards_resumo(df_detalhes):
 try:
     ss, gc = conectar_google_sheets()
     configs, estoque_produtos = carregar_configuracoes()
+    metas_dict = {}
     if configs:
         for key, df in configs.items(): st.session_state[key] = df
         st.session_state['estoque_produtos'] = estoque_produtos
+        
+        # Carregar Metas
+        if 'metas' in configs and not configs['metas'].empty:
+            for _, row in configs['metas'].iterrows():
+                try:
+                    metas_dict[row['Indicador']] = float(row['Valor'])
+                except: pass
 except Exception as e:
     st.error(f"Erro conexão: {e}")
     st.stop()
 
-st.title("📊 Sales BI Pro - Dashboard Executivo V23")
+st.title("📊 Sales BI Pro - Dashboard Executivo V24")
 
 with st.sidebar:
     st.header("📥 Importar Vendas")
@@ -411,7 +438,6 @@ with st.sidebar:
                 df_orig = pd.read_excel(uploaded_file)
                 df_processado, df_faltantes = processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads)
                 
-                # BLOQUEIO TOTAL SE HOUVER FALTANTES OU ERROS
                 if not df_faltantes.empty:
                     st.error("⛔ OPERAÇÃO CANCELADA: Foram encontrados produtos com erros ou não cadastrados!")
                     st.error("Nenhum dado foi salvo na planilha para proteger a integridade do banco de dados.")
@@ -440,7 +466,7 @@ with st.sidebar:
                     carregar_dados_detalhes.clear()
                     df_historico = carregar_dados_detalhes()
                     if not df_historico.empty:
-                        d_geral, d_cnpj, d_exec, d_bcg, d_precos = atualizar_dashboards_resumo(df_historico)
+                        d_geral, d_cnpj, d_exec, d_bcg, d_precos = atualizar_dashboards_resumo(df_historico, metas_dict)
                         
                         def salvar_aba(nome, df):
                             try:
@@ -481,21 +507,34 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📈 Visão Geral", "🏢 Por CNP
 df_detalhes = carregar_dados_detalhes()
 
 if not df_detalhes.empty and 'Total Venda' in df_detalhes.columns:
-    d_geral, d_cnpj, d_exec, d_bcg, d_precos = atualizar_dashboards_resumo(df_detalhes)
+    d_geral, d_cnpj, d_exec, d_bcg, d_precos = atualizar_dashboards_resumo(df_detalhes, metas_dict)
 
     with tab1:
-        st.metric("Vendas Totais", format_currency_br(df_detalhes['Total Venda'].sum()))
+        total_venda = df_detalhes['Total Venda'].sum()
+        margem_media = df_detalhes['Margem (%)'].mean()
+        
+        col1, col2 = st.columns(2)
+        col1.metric("Vendas Totais", format_currency_br(total_venda))
+        
+        delta_color = "normal"
+        if metas_dict:
+            if margem_media >= metas_dict.get('Margem Líquida Ideal (%)', 15)/100: delta_color = "normal" # Verde (padrão positivo)
+            elif margem_media < metas_dict.get('Margem Líquida Mínima (%)', 10)/100: delta_color = "inverse" # Vermelho
+            else: delta_color = "off" # Cinza/Amarelo
+            
+        col2.metric("Margem Média", format_percent_br(margem_media), delta_color=delta_color)
+        
         st.bar_chart(df_detalhes.groupby('Canal')['Total Venda'].sum())
         st.download_button("📥 Baixar Resumo Geral", data=to_excel(d_geral), file_name="resumo_geral.xlsx")
     with tab2:
         st.dataframe(d_cnpj.style.format({'Total Venda': 'R$ {:,.2f}', 'Margem (%)': '{:.2%}'}))
         st.download_button("📥 Baixar Análise CNPJ", data=to_excel(d_cnpj), file_name="analise_cnpj.xlsx")
     with tab3:
-        st.subheader("Matriz BCG Geral")
+        st.subheader("Matriz BCG Geral (Ranking)")
         st.dataframe(d_exec.style.format({'Total Venda': 'R$ {:,.2f}', 'Margem (%)': '{:.2%}'}))
         st.download_button("📥 Baixar BCG Geral", data=to_excel(d_exec), file_name="bcg_geral.xlsx")
     with tab4:
-        st.subheader("Matriz BCG por Canal")
+        st.subheader("Matriz BCG por Canal (Ranking)")
         st.dataframe(d_bcg.style.format({'Total Venda': 'R$ {:,.2f}', 'Margem (%)': '{:.2%}'}))
         st.download_button("📥 Baixar BCG por Canal", data=to_excel(d_bcg), file_name="bcg_canal.xlsx")
     with tab5:
