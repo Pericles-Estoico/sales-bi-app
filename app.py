@@ -9,7 +9,7 @@ import io
 import time
 
 # ==============================================================================
-# VERSÃO V22 - ORDENAÇÃO BCG E REVISÃO EMBALAGEM
+# VERSÃO V23 - SEGURANÇA TOTAL (BLOQUEIO DE ERROS)
 # CORREÇÕES ACUMULADAS:
 # 1. Autenticação restaurada
 # 2. Matriz BCG implementada (Geral e Por Canal)
@@ -28,7 +28,8 @@ import time
 # 15. Botão de Atualização Manual (Limpar Cache)
 # 16. Tratamento de 'nan' na aba de preços (substituído por '-')
 # 17. Formatação forçada de R$ na aba de preços
-# 18. NOVO: Ordenação BCG (Vaca -> Estrela -> Interrogação -> Abacaxi)
+# 18. Ordenação BCG (Vaca -> Estrela -> Interrogação -> Abacaxi)
+# 19. NOVO: BLOQUEIO TOTAL DE SALVAMENTO SE HOUVER ERRO DE CUSTO OU PRODUTO
 # ==============================================================================
 
 # ==============================================================================
@@ -53,7 +54,6 @@ COLUNAS_ESPERADAS = [
     'Investimento Ads', 'Custo Total', 'Lucro Bruto', 'Margem (%)'
 ]
 
-# Ordem personalizada para BCG
 ORDEM_BCG = ['Vaca Leiteira 🐄', 'Estrela ⭐', 'Interrogação ❓', 'Abacaxi 🍍']
 
 # ==============================================================================
@@ -273,19 +273,37 @@ def processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads_total):
         custo_produto = 0.0
         tipo = 'Produto'
         encontrado = False
+        erro_motivo = ""
         
         if prod_norm in kits_map:
             tipo = 'Kit'
             encontrado = True
             for comp in kits_map[prod_norm]:
                 c_norm = normalizar(comp['sku'])
-                if c_norm in produtos_map: custo_produto += produtos_map[c_norm]['custo'] * comp['qtd']
+                if c_norm in produtos_map:
+                    c_custo = produtos_map[c_norm]['custo']
+                    if c_custo <= 0:
+                        encontrado = False
+                        erro_motivo = f"Componente {comp['sku']} com Custo Zero"
+                        break
+                    custo_produto += c_custo * comp['qtd']
+                else:
+                    encontrado = False
+                    erro_motivo = f"Componente {comp['sku']} não cadastrado"
+                    break
         elif prod_norm in produtos_map:
             custo_produto = produtos_map[prod_norm]['custo']
-            encontrado = True
+            if custo_produto > 0:
+                encontrado = True
+            else:
+                erro_motivo = "Custo Zero no Cadastro"
+        else:
+            erro_motivo = "Produto não cadastrado"
         
         if not encontrado:
-            faltantes.append({'Código': prod_cod, 'Tipo': 'Não Cadastrado'})
+            faltantes.append({'Código': prod_cod, 'Motivo': erro_motivo})
+            # Se não encontrou ou tem erro, NÃO calcula o resto, pois vai travar o salvamento
+            continue
 
         custo_total_prod = custo_produto * qtd
         imposto_val = total_venda * aliquota
@@ -293,7 +311,6 @@ def processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads_total):
         taxa_fixa_val = taxa_fixa * qtd
         ads_rateio = (total_venda / total_vendas_dia) * custo_ads_total if total_vendas_dia > 0 else 0.0
         
-        # Custo de embalagem é por unidade vendida (kit conta como 1 unidade)
         custo_total_geral = custo_total_prod + imposto_val + comissao_val + taxa_fixa_val + (custo_emb * qtd) + ads_rateio
         lucro = total_venda - custo_total_geral
         margem = (lucro / total_venda) if total_venda > 0 else 0.0
@@ -329,7 +346,6 @@ def atualizar_dashboards_resumo(df_detalhes):
     med_m = dash_exec['Margem (%)'].median()
     dash_exec['Classificação BCG'] = dash_exec.apply(lambda x: classificar_bcg(x, med_v, med_m), axis=1)
     
-    # Ordenação BCG Geral
     dash_exec['Classificação BCG'] = pd.Categorical(dash_exec['Classificação BCG'], categories=ORDEM_BCG, ordered=True)
     dash_exec = dash_exec.sort_values('Classificação BCG')
     
@@ -346,7 +362,6 @@ def atualizar_dashboards_resumo(df_detalhes):
     
     df_bcg_final = pd.concat(bcg_final) if bcg_final else pd.DataFrame()
     if not df_bcg_final.empty:
-        # Ordenação BCG por Canal
         df_bcg_final['Classificação'] = pd.Categorical(df_bcg_final['Classificação'], categories=ORDEM_BCG, ordered=True)
         df_bcg_final = df_bcg_final.sort_values(['Canal', 'Classificação'])
 
@@ -371,12 +386,11 @@ except Exception as e:
     st.error(f"Erro conexão: {e}")
     st.stop()
 
-st.title("📊 Sales BI Pro - Dashboard Executivo V22")
+st.title("📊 Sales BI Pro - Dashboard Executivo V23")
 
 with st.sidebar:
     st.header("📥 Importar Vendas")
     
-    # BOTÃO DE ATUALIZAÇÃO MANUAL
     if st.button("🔄 Atualizar Dados (Limpar Cache)"):
         carregar_dados_detalhes.clear()
         carregar_configuracoes.clear()
@@ -397,7 +411,16 @@ with st.sidebar:
                 df_orig = pd.read_excel(uploaded_file)
                 df_processado, df_faltantes = processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads)
                 
-                if df_processado is not None and not df_processado.empty:
+                # BLOQUEIO TOTAL SE HOUVER FALTANTES OU ERROS
+                if not df_faltantes.empty:
+                    st.error("⛔ OPERAÇÃO CANCELADA: Foram encontrados produtos com erros ou não cadastrados!")
+                    st.error("Nenhum dado foi salvo na planilha para proteger a integridade do banco de dados.")
+                    st.dataframe(df_faltantes)
+                    st.download_button("📥 Baixar Relatório de Erros", 
+                                       data=to_excel(df_faltantes), 
+                                       file_name="erros_impediram_salvamento.xlsx")
+                
+                elif df_processado is not None and not df_processado.empty:
                     ws_detalhes = ss.worksheet("6. Detalhes")
                     first_row = ws_detalhes.row_values(1)
                     if not first_row or 'Total Venda' not in first_row or 'Lucro Bruto' not in first_row:
@@ -412,7 +435,7 @@ with st.sidebar:
                     
                     df_salvar = df_salvar[COLUNAS_ESPERADAS]
                     ws_detalhes.append_rows(df_salvar.astype(str).values.tolist())
-                    st.success(f"✅ {len(df_processado)} vendas salvas!")
+                    st.success(f"✅ {len(df_processado)} vendas salvas com sucesso!")
                     
                     carregar_dados_detalhes.clear()
                     df_historico = carregar_dados_detalhes()
@@ -448,13 +471,6 @@ with st.sidebar:
                         if d_bcg is not None: salvar_aba("5. Matriz BCG", d_bcg)
                         
                         st.success("Dashboards atualizados!")
-                        
-                        if not df_faltantes.empty:
-                            st.warning(f"⚠️ {len(df_faltantes)} produtos não encontrados no cadastro!")
-                            st.download_button("📥 Baixar Lista de Faltantes", 
-                                               data=to_excel(df_faltantes), 
-                                               file_name="produtos_faltantes.xlsx")
-                        
                         time.sleep(1)
                         st.rerun()
                     else: st.warning("Dados salvos, mas histórico parece vazio.")
