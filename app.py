@@ -9,7 +9,7 @@ import io
 import time
 
 # ==============================================================================
-# VERSÃO V26 - TICKET MÉDIO + DIAGNÓSTICO
+# VERSÃO V27 - GIRO DE PRODUTOS (EXPLOSÃO DE KITS)
 # CORREÇÕES ACUMULADAS:
 # 1. Autenticação restaurada
 # 2. Matriz BCG implementada (Geral e Por Canal)
@@ -33,7 +33,8 @@ import time
 # 20. Integração com aba 'Metas' (Indicadores Visuais)
 # 21. Coluna de Ranking Numérico (1º, 2º, 3º...)
 # 22. Painel de Diagnóstico (Nome da Planilha + Contagem de Registros)
-# 23. NOVO: Indicador de Ticket Médio na Visão Geral
+# 23. Indicador de Ticket Médio na Visão Geral
+# 24. NOVO: Aba '7. Giro de Produtos' (Consumo Real de Estoque)
 # ==============================================================================
 
 # ==============================================================================
@@ -338,11 +339,54 @@ def processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads_total):
         
     return pd.DataFrame(resultados), pd.DataFrame(faltantes)
 
+def calcular_giro_produtos(df_detalhes):
+    # Recuperar mapa de kits
+    kits_df = st.session_state.get('kits', pd.DataFrame())
+    kits_map = {}
+    if not kits_df.empty and 'Código Kit' in kits_df.columns:
+        for _, row in kits_df.iterrows():
+            cod_kit = normalizar(str(row['Código Kit']))
+            comps = str(row.get('SKUs Componentes', '')).split(';') if ';' in str(row.get('SKUs Componentes', '')) else [str(row.get('SKUs Componentes', ''))]
+            qtds = str(row.get('Qtd Componentes', '')).split(';') if ';' in str(row.get('Qtd Componentes', '')) else [str(row.get('Qtd Componentes', ''))]
+            if len(qtds) < len(comps): qtds = [1]*len(comps)
+            kits_map[cod_kit] = [{'sku': c.strip(), 'qtd': clean_float(q)} for c, q in zip(comps, qtds)]
+
+    giro_real = []
+    
+    for _, row in df_detalhes.iterrows():
+        prod_cod = str(row['Produto']).strip()
+        prod_norm = normalizar(prod_cod)
+        qtd_venda = row['Quantidade']
+        
+        if prod_norm in kits_map:
+            # É Kit: Explode
+            for comp in kits_map[prod_norm]:
+                giro_real.append({
+                    'SKU Real': comp['sku'],
+                    'Qtd Vendida': qtd_venda * comp['qtd'],
+                    'Origem': 'Kit'
+                })
+        else:
+            # É Produto Avulso
+            giro_real.append({
+                'SKU Real': prod_cod,
+                'Qtd Vendida': qtd_venda,
+                'Origem': 'Avulso'
+            })
+            
+    if not giro_real: return pd.DataFrame()
+    
+    df_giro = pd.DataFrame(giro_real)
+    df_agrupado = df_giro.groupby('SKU Real')['Qtd Vendida'].sum().reset_index()
+    df_agrupado = df_agrupado.sort_values('Qtd Vendida', ascending=False)
+    
+    return df_agrupado
+
 def atualizar_dashboards_resumo(df_detalhes, metas_dict):
-    if df_detalhes.empty: return None, None, None, None, None
+    if df_detalhes.empty: return None, None, None, None, None, None
     
     cols_req = ['Canal', 'Total Venda', 'Lucro Bruto', 'Quantidade', 'Margem (%)', 'CNPJ', 'Produto']
-    if not all(c in df_detalhes.columns for c in cols_req): return None, None, None, None, None
+    if not all(c in df_detalhes.columns for c in cols_req): return None, None, None, None, None, None
 
     dash_geral = df_detalhes.groupby('Canal').agg({
         'Total Venda': 'sum', 'Lucro Bruto': 'sum', 'Quantidade': 'sum', 'Margem (%)': 'mean'
@@ -392,7 +436,10 @@ def atualizar_dashboards_resumo(df_detalhes, metas_dict):
     df_precos['Preço Médio'] = df_precos['Total Venda'] / df_precos['Quantidade']
     df_precos_pivot = df_precos.pivot(index='Produto', columns='Canal', values='Preço Médio').reset_index()
 
-    return dash_geral, dash_cnpj, dash_exec, df_bcg_final, df_precos_pivot
+    # NOVO: Calcular Giro de Produtos
+    df_giro = calcular_giro_produtos(df_detalhes)
+
+    return dash_geral, dash_cnpj, dash_exec, df_bcg_final, df_precos_pivot, df_giro
 
 # ==============================================================================
 # INTERFACE
@@ -414,7 +461,7 @@ except Exception as e:
     st.error(f"Erro conexão: {e}")
     st.stop()
 
-st.title("📊 Sales BI Pro - Dashboard Executivo V26")
+st.title("📊 Sales BI Pro - Dashboard Executivo V27")
 
 with st.sidebar:
     st.header("🔌 Status da Conexão")
@@ -483,7 +530,7 @@ with st.sidebar:
                     carregar_dados_detalhes.clear()
                     df_historico = carregar_dados_detalhes()
                     if not df_historico.empty:
-                        d_geral, d_cnpj, d_exec, d_bcg, d_precos = atualizar_dashboards_resumo(df_historico, metas_dict)
+                        d_geral, d_cnpj, d_exec, d_bcg, d_precos, d_giro = atualizar_dashboards_resumo(df_historico, metas_dict)
                         
                         def salvar_aba(nome, df):
                             try:
@@ -512,6 +559,7 @@ with st.sidebar:
                         if d_exec is not None: salvar_aba("3. Análise Executiva", d_exec)
                         if d_precos is not None: salvar_aba("4. Preços Marketplaces", d_precos)
                         if d_bcg is not None: salvar_aba("5. Matriz BCG", d_bcg)
+                        if d_giro is not None: salvar_aba("7. Giro de Produtos", d_giro)
                         
                         st.success("Dashboards atualizados!")
                         time.sleep(1)
@@ -520,11 +568,11 @@ with st.sidebar:
             except Exception as e: st.error(f"Erro: {e}")
 
 st.divider()
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📈 Visão Geral", "🏢 Por CNPJ", "⭐ BCG Geral", "🎯 BCG por Canal", "💲 Preços", "📋 Detalhes"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["📈 Visão Geral", "🏢 Por CNPJ", "⭐ BCG Geral", "🎯 BCG por Canal", "💲 Preços", "📋 Detalhes", "📦 Giro de Produtos"])
 df_detalhes = carregar_dados_detalhes()
 
 if not df_detalhes.empty and 'Total Venda' in df_detalhes.columns:
-    d_geral, d_cnpj, d_exec, d_bcg, d_precos = atualizar_dashboards_resumo(df_detalhes, metas_dict)
+    d_geral, d_cnpj, d_exec, d_bcg, d_precos, d_giro = atualizar_dashboards_resumo(df_detalhes, metas_dict)
 
     with tab1:
         total_venda = df_detalhes['Total Venda'].sum()
@@ -570,5 +618,13 @@ if not df_detalhes.empty and 'Total Venda' in df_detalhes.columns:
     with tab6:
         st.dataframe(df_detalhes)
         st.download_button("📥 Baixar Detalhes Completos", data=to_excel(df_detalhes), file_name="detalhes_vendas.xlsx")
+    with tab7:
+        st.subheader("📦 Giro de Produtos (Explosão de Kits + Avulsos)")
+        st.info("Esta tabela mostra a quantidade real de cada SKU vendida, somando vendas avulsas e componentes de kits.")
+        if d_giro is not None and not d_giro.empty:
+            st.dataframe(d_giro)
+            st.download_button("📥 Baixar Giro de Produtos", data=to_excel(d_giro), file_name="giro_produtos.xlsx")
+        else:
+            st.warning("Nenhum dado de giro calculado ainda.")
 else:
     st.info("Aguardando dados...")
