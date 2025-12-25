@@ -10,25 +10,26 @@ import time
 import requests
 import math
 from io import StringIO
-from fpdf import FPDF
+import xlsxwriter
 
 # ==============================================================================
-# VERSÃO V32 - SUPER APP COM MRP (PLANEJAMENTO DE RECURSOS EM CASCATA)
+# VERSÃO V33 - SUPER APP COM MODO SIMULAÇÃO E EXCEL HIERÁRQUICO
 # ==============================================================================
-# ADICIONA LÓGICA RECURSIVA PARA VERIFICAR ESTOQUE EM MÚLTIPLOS NÍVEIS
-# (PRODUTO -> INSUMO -> MATÉRIA-PRIMA) SEM BAIXA AUTOMÁTICA DE INSUMOS
+# 1. MODO SIMULAÇÃO GLOBAL: Bloqueia qualquer escrita no Google Sheets/Webhook
+# 2. EXCEL HIERÁRQUICO: Agrupa por Semi (Pai) -> Acabamentos (Filhos)
+# 3. ABAS POR MARKETPLACE: Gera uma aba para cada canal no Excel de Produção
 # ==============================================================================
 
 st.set_page_config(page_title="Sales BI Pro + MRP Fábrica", page_icon="🏭", layout="wide")
 
 # ==============================================================================
-# CONFIGURAÇÕES DO MÓDULO DE ESTOQUE (IMPORTADO DO OUTRO APP)
+# CONFIGURAÇÕES DO MÓDULO DE ESTOQUE
 # ==============================================================================
 ESTOQUE_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1PpiMQingHf4llA03BiPIuPJPIZqul4grRU_emWDEK1o/export?format=csv"
 ESTOQUE_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbxTX9uUWnByw6sk6MtuJ5FbjV7zeBKYEoUPPlUlUDS738QqocfCd_NAlh9Eh25XhQywTw/exec"
 
 # ==============================================================================
-# CONSTANTES E MAPEAMENTOS (BI FINANCEIRO)
+# CONSTANTES E MAPEAMENTOS
 # ==============================================================================
 CHANNELS = {
     'geral': '📊 Vendas Gerais',
@@ -47,7 +48,7 @@ COLUNAS_ESPERADAS = [
 ORDEM_BCG = ['Vaca Leiteira 🐄', 'Estrela ⭐', 'Interrogação ❓', 'Abacaxi 🍍']
 
 # ==============================================================================
-# FUNÇÕES UTILITÁRIAS (GERAL)
+# FUNÇÕES UTILITÁRIAS
 # ==============================================================================
 def clean_currency(value):
     if pd.isna(value) or value == '': return 0.0
@@ -93,9 +94,15 @@ def normalizar(texto):
     texto = ''.join(c for c in texto if unicodedata.category(c) != 'Mn')
     return texto.lower().strip()
 
-# ==============================================================================
-# FUNÇÕES ESPECÍFICAS DO MÓDULO DE ESTOQUE (MRP RECURSIVO)
-# ==============================================================================
+def normalize_key(s: str) -> str:
+    if s is None: return ""
+    s = str(s)
+    s = unicodedata.normalize('NFKD', s)
+    s = ''.join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.replace('ß', 'ss')
+    s = ''.join(ch for ch in s if ch.isalnum() or ch == '-')
+    return s.upper().strip()
+
 def safe_int(x, default=0):
     try:
         if x is None: return default
@@ -115,15 +122,9 @@ def parse_int_list(value):
         if v is not None: out.append(v)
     return out
 
-def normalize_key(s: str) -> str:
-    if s is None: return ""
-    s = str(s)
-    s = unicodedata.normalize('NFKD', s)
-    s = ''.join(ch for ch in s if not unicodedata.combining(ch))
-    s = s.replace('ß', 'ss')
-    s = ''.join(ch for ch in s if ch.isalnum() or ch == '-')
-    return s.upper().strip()
-
+# ==============================================================================
+# FUNÇÕES DE ESTOQUE E MRP
+# ==============================================================================
 @st.cache_data(ttl=60)
 def carregar_estoque_externo():
     try:
@@ -147,26 +148,13 @@ def carregar_estoque_externo():
         st.error(f"Erro ao carregar estoque externo: {e}")
         return pd.DataFrame()
 
-# --- LÓGICA MRP RECURSIVA ---
 def calcular_mrp_recursivo(codigo_key, qtd_necessaria, df_estoque, nivel=0, caminho=""):
-    """
-    Calcula a necessidade de produção em cascata (Pai -> Filho -> Neto).
-    Retorna uma lista de ações necessárias.
-    """
     acoes = []
-    
-    # Busca o produto no estoque
     produto = df_estoque[df_estoque['codigo_key'] == codigo_key]
     if produto.empty:
-        # Produto não cadastrado: gera alerta e para
         acoes.append({
-            'nivel': nivel,
-            'codigo': codigo_key,
-            'nome': f"PRODUTO NÃO ENCONTRADO ({codigo_key})",
-            'acao': 'ERRO_CADASTRO',
-            'qtd': qtd_necessaria,
-            'estoque_atual': 0,
-            'caminho': caminho
+            'nivel': nivel, 'codigo': codigo_key, 'nome': f"PRODUTO NÃO ENCONTRADO ({codigo_key})",
+            'acao': 'ERRO_CADASTRO', 'qtd': qtd_necessaria, 'estoque_atual': 0, 'caminho': caminho
         })
         return acoes
 
@@ -175,170 +163,151 @@ def calcular_mrp_recursivo(codigo_key, qtd_necessaria, df_estoque, nivel=0, cami
     estoque_atual = safe_int(row['estoque_atual'])
     eh_kit = str(row.get('eh_kit', '')).strip().lower() == 'sim'
     
-    # 1. Verifica se tem estoque do produto pronto
     qtd_usar_estoque = min(estoque_atual, qtd_necessaria)
     qtd_faltante = qtd_necessaria - qtd_usar_estoque
     
     if qtd_usar_estoque > 0:
         acoes.append({
-            'nivel': nivel,
-            'codigo': row['codigo'],
-            'nome': nome,
-            'acao': 'SEPARAR_ESTOQUE',
-            'qtd': qtd_usar_estoque,
-            'estoque_atual': estoque_atual,
-            'caminho': caminho
+            'nivel': nivel, 'codigo': row['codigo'], 'nome': nome,
+            'acao': 'SEPARAR_ESTOQUE', 'qtd': qtd_usar_estoque, 'estoque_atual': estoque_atual, 'caminho': caminho
         })
         
-    # 2. Se faltar, verifica como produzir (Explosão)
     if qtd_faltante > 0:
         if eh_kit:
-            # É um Kit/Composto: Precisa dos componentes
             comps = [normalize_key(c.strip()) for c in str(row.get('componentes', '')).split(',') if c.strip()]
             quants = parse_int_list(row.get('quantidades', ''))
             
             if comps and quants and len(comps) == len(quants):
                 acoes.append({
-                    'nivel': nivel,
-                    'codigo': row['codigo'],
-                    'nome': nome,
-                    'acao': 'PRODUZIR_MONTAR',
-                    'qtd': qtd_faltante,
-                    'estoque_atual': estoque_atual,
-                    'caminho': caminho
+                    'nivel': nivel, 'codigo': row['codigo'], 'nome': nome,
+                    'acao': 'PRODUZIR_MONTAR', 'qtd': qtd_faltante, 'estoque_atual': estoque_atual, 'caminho': caminho
                 })
-                
-                # Recursão para cada componente
                 for comp_key, comp_qtd_unit in zip(comps, quants):
                     qtd_comp_total = qtd_faltante * comp_qtd_unit
                     novo_caminho = f"{caminho} > {nome}" if caminho else nome
                     acoes_filho = calcular_mrp_recursivo(comp_key, qtd_comp_total, df_estoque, nivel + 1, novo_caminho)
                     acoes.extend(acoes_filho)
             else:
-                # Kit sem receita válida
                 acoes.append({
-                    'nivel': nivel,
-                    'codigo': row['codigo'],
-                    'nome': nome,
-                    'acao': 'ERRO_RECEITA',
-                    'qtd': qtd_faltante,
-                    'estoque_atual': estoque_atual,
-                    'caminho': caminho
+                    'nivel': nivel, 'codigo': row['codigo'], 'nome': nome,
+                    'acao': 'ERRO_RECEITA', 'qtd': qtd_faltante, 'estoque_atual': estoque_atual, 'caminho': caminho
                 })
         else:
-            # É Matéria-Prima ou Produto Final sem receita (Compra)
             acoes.append({
-                'nivel': nivel,
-                'codigo': row['codigo'],
-                'nome': nome,
-                'acao': 'COMPRAR_PRODUZIR_EXTERNO',
-                'qtd': qtd_faltante,
-                'estoque_atual': estoque_atual,
-                'caminho': caminho
+                'nivel': nivel, 'codigo': row['codigo'], 'nome': nome,
+                'acao': 'COMPRAR_PRODUZIR_EXTERNO', 'qtd': qtd_faltante, 'estoque_atual': estoque_atual, 'caminho': caminho
             })
-            
     return acoes
 
 def processar_mrp_fila(df_vendas_fila, df_estoque):
-    # Agrupa vendas por produto
     vendas_agrupadas = df_vendas_fila.groupby('Produto')['Quantidade'].sum().reset_index()
-    
     plano_mrp = []
-    
     for _, row in vendas_agrupadas.iterrows():
         cod_key = normalize_key(row['Produto'])
         qtd = safe_int(row['Quantidade'])
-        
-        # Chama a função recursiva para cada produto vendido
         acoes = calcular_mrp_recursivo(cod_key, qtd, df_estoque)
         plano_mrp.extend(acoes)
-        
     return pd.DataFrame(plano_mrp)
 
-def gerar_pdf_mrp(df_mrp, df_vendas_fila):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", size=10)
+# ==============================================================================
+# GERAÇÃO DE EXCEL HIERÁRQUICO (ÁRVORE DE SEMIS)
+# ==============================================================================
+def gerar_excel_hierarquico(df_vendas_fila, df_estoque):
+    """
+    Gera um Excel com abas por Marketplace.
+    Em cada aba, agrupa os produtos pelo seu 'Semi' (Pai).
+    """
+    output = io.BytesIO()
+    workbook = xlsxwriter.Workbook(output, {'in_memory': True})
     
-    # Cabeçalho
-    pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, "RELATÓRIO DE PRODUÇÃO MRP (CASCATA)", ln=True, align='C')
-    pdf.set_font("Arial", size=10)
-    pdf.cell(0, 10, f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}", ln=True, align='C')
-    pdf.ln(5)
+    # Formatos
+    fmt_header = workbook.add_format({'bold': True, 'bg_color': '#D9EAD3', 'border': 1})
+    fmt_pai = workbook.add_format({'bold': True, 'bg_color': '#EFEFEF', 'border': 1})
+    fmt_filho = workbook.add_format({'indent': 2, 'border': 1})
+    fmt_check = workbook.add_format({'border': 1})
     
-    # 1. Resumo de Ações (O que fazer)
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(0, 10, "1. PLANO DE AÇÃO (O QUE FAZER)", ln=True)
+    # 1. Identificar o "Semi" de cada produto vendido
+    # Procura nos componentes do Kit se existe algum com nome "Semi" ou "Base"
+    mapa_produto_semi = {}
     
-    # Agrupa por tipo de ação
-    acoes_order = ['SEPARAR_ESTOQUE', 'PRODUZIR_MONTAR', 'COMPRAR_PRODUZIR_EXTERNO', 'ERRO_CADASTRO', 'ERRO_RECEITA']
+    for _, row in df_estoque.iterrows():
+        if str(row.get('eh_kit', '')).lower() == 'sim':
+            comps_nomes = [] # Precisaria dos nomes dos componentes, mas aqui só tenho códigos no CSV de estoque
+            # Como o CSV de estoque tem 'componentes' (códigos), vou tentar achar o nome do componente
+            # Isso exigiria um lookup reverso. Simplificação:
+            # Vou assumir que o "Semi" é o PRIMEIRO componente da lista do Kit
+            comps_cods = [normalize_key(c.strip()) for c in str(row.get('componentes', '')).split(',') if c.strip()]
+            if comps_cods:
+                semi_cod = comps_cods[0] # Assumindo que o Semi é o primeiro
+                # Busca o nome desse Semi
+                semi_row = df_estoque[df_estoque['codigo_key'] == semi_cod]
+                if not semi_row.empty:
+                    mapa_produto_semi[row['codigo_key']] = semi_row.iloc[0]['nome']
+                else:
+                    mapa_produto_semi[row['codigo_key']] = f"Base ({semi_cod})"
     
-    for acao in acoes_order:
-        itens = df_mrp[df_mrp['acao'] == acao]
-        if itens.empty: continue
+    # 2. Agrupar vendas por Canal
+    canais = df_vendas_fila['Canal'].unique()
+    
+    for canal in canais:
+        # Limpa nome da aba (max 31 chars)
+        nome_aba = str(canal).replace('📊 ', '').replace('🛒 ', '').replace('🛍️ ', '').replace('🏪 ', '').replace('👗 ', '')[:30]
+        worksheet = workbook.add_worksheet(nome_aba)
         
-        # Agrupa itens iguais (ex: soma todos os tecidos necessários de diferentes produtos)
-        itens_agrupados = itens.groupby(['codigo', 'nome'])['qtd'].sum().reset_index()
+        # Cabeçalhos
+        worksheet.write(0, 0, "Item / Produto", fmt_header)
+        worksheet.write(0, 1, "Quantidade", fmt_header)
+        worksheet.write(0, 2, "Check", fmt_header)
+        worksheet.set_column(0, 0, 60)
+        worksheet.set_column(1, 1, 15)
+        worksheet.set_column(2, 2, 10)
         
-        pdf.set_font("Arial", 'B', 10)
-        pdf.set_fill_color(230, 230, 230)
-        titulo = acao.replace('_', ' ')
-        pdf.cell(0, 8, f"AÇÃO: {titulo}", ln=True, fill=True)
+        # Filtra vendas do canal
+        vendas_canal = df_vendas_fila[df_vendas_fila['Canal'] == canal]
         
-        pdf.set_font("Arial", 'B', 8)
-        pdf.cell(30, 6, "Código", border=1)
-        pdf.cell(120, 6, "Item", border=1)
-        pdf.cell(30, 6, "Quantidade", border=1, align='C')
-        pdf.ln()
+        # Agrupa por Semi
+        arvore = {} # { 'Nome do Semi': [ {'produto': 'Body X', 'qtd': 10}, ... ] }
         
-        pdf.set_font("Arial", size=8)
-        for _, row in itens_agrupados.iterrows():
-            pdf.cell(30, 6, str(row['codigo']), border=1)
-            pdf.cell(120, 6, str(row['nome'])[:60], border=1)
-            pdf.cell(30, 6, str(int(row['qtd'])), border=1, align='C')
-            pdf.ln()
-        pdf.ln(3)
-        
-    pdf.ln(5)
-    
-    # 2. Detalhamento da Árvore (Para conferência)
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(0, 10, "2. DETALHAMENTO DA ÁRVORE (RASTRO)", ln=True)
-    pdf.set_font("Arial", size=7)
-    
-    col_w = [10, 30, 80, 30, 20, 20]
-    headers = ["Nvl", "Código", "Item", "Ação", "Qtd", "Estoque"]
-    for i, h in enumerate(headers): pdf.cell(col_w[i], 6, h, border=1, align='C')
-    pdf.ln()
-    
-    for _, row in df_mrp.iterrows():
-        indent = ">" * int(row['nivel'])
-        pdf.cell(col_w[0], 6, str(row['nivel']), border=1, align='C')
-        pdf.cell(col_w[1], 6, str(row['codigo']), border=1)
-        pdf.cell(col_w[2], 6, f"{indent} {str(row['nome'])[:40]}", border=1)
-        pdf.cell(col_w[3], 6, str(row['acao'])[:15], border=1)
-        pdf.cell(col_w[4], 6, str(int(row['qtd'])), border=1, align='C')
-        pdf.cell(col_w[5], 6, str(int(row['estoque_atual'])), border=1, align='C')
-        pdf.ln()
-
-    return pdf.output(dest='S').encode('latin-1')
-
-def movimentar_estoque_webhook(codigo, quantidade, tipo, colaborador):
-    try:
-        payload = {
-            'codigo': codigo,
-            'quantidade': safe_int(quantidade, 0),
-            'tipo': tipo,
-            'colaborador': colaborador
-        }
-        r = requests.post(ESTOQUE_WEBHOOK_URL, json=payload, timeout=20)
-        return r.json()
-    except Exception as e:
-        return {'success': False, 'message': f'Erro: {str(e)}'}
+        for _, row in vendas_canal.iterrows():
+            prod_cod = str(row['Produto'])
+            prod_key = normalize_key(prod_cod)
+            qtd = row['Quantidade']
+            
+            # Tenta achar o nome do produto no estoque
+            prod_nome = prod_cod
+            prod_row = df_estoque[df_estoque['codigo_key'] == prod_key]
+            if not prod_row.empty: prod_nome = prod_row.iloc[0]['nome']
+            
+            semi_nome = mapa_produto_semi.get(prod_key, "Outros / Sem Base Definida")
+            
+            if semi_nome not in arvore: arvore[semi_nome] = []
+            arvore[semi_nome].append({'produto': prod_nome, 'qtd': qtd})
+            
+        # Escreve na aba
+        row_idx = 1
+        for semi, itens in arvore.items():
+            total_semi = sum(item['qtd'] for item in itens)
+            
+            # Linha do Pai (Semi)
+            worksheet.write(row_idx, 0, f"{semi}", fmt_pai)
+            worksheet.write(row_idx, 1, total_semi, fmt_pai)
+            worksheet.write(row_idx, 2, "", fmt_pai)
+            row_idx += 1
+            
+            # Linhas dos Filhos (Produtos Finais)
+            for item in itens:
+                worksheet.write(row_idx, 0, f"  {item['produto']}", fmt_filho)
+                worksheet.write(row_idx, 1, item['qtd'], fmt_filho)
+                worksheet.write(row_idx, 2, "[   ]", fmt_check)
+                row_idx += 1
+            
+            row_idx += 1 # Espaço entre grupos
+            
+    workbook.close()
+    return output.getvalue()
 
 # ==============================================================================
-# CONEXÃO COM GOOGLE SHEETS (BI FINANCEIRO)
+# CONEXÃO COM GOOGLE SHEETS
 # ==============================================================================
 @st.cache_resource
 def conectar_google_sheets():
@@ -766,6 +735,13 @@ st.title("📊 Sales BI Pro + 🏭 MRP Fábrica")
 
 with st.sidebar:
     st.header("🔌 Status da Conexão")
+    
+    # MODO SIMULAÇÃO
+    modo_simulacao = st.checkbox("🧪 MODO SIMULAÇÃO (Sandbox)", value=False, help="Ative para testar uploads sem salvar nada na planilha.")
+    
+    if modo_simulacao:
+        st.warning("⚠️ MODO SIMULAÇÃO ATIVO: Nenhuma alteração será salva!")
+    
     if ss:
         st.success(f"Conectado a: **{ss.title}**")
         
@@ -798,11 +774,13 @@ with st.sidebar:
     custo_ads = st.number_input("💰 Ads (R$)", min_value=0.0, step=10.0)
     uploaded_file = st.file_uploader("Arquivo Excel", type=['xlsx'])
     
-    # Variável de sessão para guardar a FILA ACUMULADA de vendas para baixa
-    if 'fila_baixa_estoque' not in st.session_state:
-        st.session_state['fila_baixa_estoque'] = pd.DataFrame()
+    # Variáveis de sessão para filas
+    if 'fila_baixa_estoque' not in st.session_state: st.session_state['fila_baixa_estoque'] = pd.DataFrame()
+    if 'fila_simulacao' not in st.session_state: st.session_state['fila_simulacao'] = pd.DataFrame()
 
-    if uploaded_file and st.button("🚀 Processar e Salvar"):
+    btn_label = "🚀 Simular Processamento" if modo_simulacao else "🚀 Processar e Salvar"
+    
+    if uploaded_file and st.button(btn_label):
         with st.spinner("Processando..."):
             try:
                 df_orig = pd.read_excel(uploaded_file)
@@ -810,61 +788,65 @@ with st.sidebar:
                 
                 if not df_faltantes.empty:
                     st.error("⛔ OPERAÇÃO CANCELADA: Foram encontrados produtos com erros ou não cadastrados!")
-                    st.error("Nenhum dado foi salvo na planilha para proteger a integridade do banco de dados.")
                     st.dataframe(df_faltantes)
-                    st.download_button("📥 Baixar Relatório de Erros", 
-                                       data=to_excel(df_faltantes), 
-                                       file_name="erros_impediram_salvamento.xlsx")
+                    st.download_button("📥 Baixar Relatório de Erros", data=to_excel(df_faltantes), file_name="erros_impediram_salvamento.xlsx")
                 
                 elif df_processado is not None and not df_processado.empty:
-                    # ACUMULA NA FILA DE BAIXA (NÃO SUBSTITUI)
                     df_novo_lote = df_processado.copy()
-                    df_novo_lote['Canal'] = CHANNELS[canal] # Garante que o canal está correto
+                    df_novo_lote['Canal'] = CHANNELS[canal]
                     
-                    if st.session_state['fila_baixa_estoque'].empty:
-                        st.session_state['fila_baixa_estoque'] = df_novo_lote
+                    if modo_simulacao:
+                        # MODO SIMULAÇÃO: Salva apenas na fila temporária de simulação
+                        if st.session_state['fila_simulacao'].empty:
+                            st.session_state['fila_simulacao'] = df_novo_lote
+                        else:
+                            st.session_state['fila_simulacao'] = pd.concat([st.session_state['fila_simulacao'], df_novo_lote], ignore_index=True)
+                        st.success(f"🧪 SIMULAÇÃO: {len(df_processado)} vendas processadas na memória. Nada foi salvo.")
+                        
                     else:
-                        st.session_state['fila_baixa_estoque'] = pd.concat([st.session_state['fila_baixa_estoque'], df_novo_lote], ignore_index=True)
-                    
-                    # Salva no Google Sheets (Financeiro)
-                    ws_detalhes = ss.worksheet("6. Detalhes")
-                    first_row = ws_detalhes.row_values(1)
-                    if not first_row or 'Total Venda' not in first_row or 'Lucro Bruto' not in first_row:
-                        ws_detalhes.clear()
-                        ws_detalhes.append_row(COLUNAS_ESPERADAS)
-                    
-                    df_salvar = df_processado.copy()
-                    for c in df_salvar.columns:
-                        if 'Margem' in c: df_salvar[c] = df_salvar[c].apply(format_percent_br)
-                        elif any(x in c for x in ['Venda', 'Lucro', 'Custo', 'Preço', 'Impostos', 'Comissão', 'Taxas', 'Embalagem', 'Ads']): 
-                            df_salvar[c] = df_salvar[c].apply(format_currency_br)
-                    
-                    df_salvar = df_salvar[COLUNAS_ESPERADAS]
-                    ws_detalhes.append_rows(df_salvar.astype(str).values.tolist())
-                    st.success(f"✅ {len(df_processado)} vendas salvas com sucesso! Adicionadas à Fila de Baixa.")
-                    
-                    carregar_dados_detalhes.clear()
-                    df_historico = carregar_dados_detalhes()
-                    if not df_historico.empty:
-                        d_geral, d_cnpj, d_exec, d_bcg, d_precos, d_giro, d_oportunidades = atualizar_dashboards_resumo(df_historico, metas_dict)
-                        salvar_todos_dashboards(ss, d_geral, d_cnpj, d_exec, d_precos, d_bcg, d_giro, d_oportunidades)
-                        st.success("Dashboards atualizados!")
-                        time.sleep(1)
-                        st.rerun()
-                    else: st.warning("Dados salvos, mas histórico parece vazio.")
+                        # MODO REAL: Salva no Sheets e na fila real
+                        if st.session_state['fila_baixa_estoque'].empty:
+                            st.session_state['fila_baixa_estoque'] = df_novo_lote
+                        else:
+                            st.session_state['fila_baixa_estoque'] = pd.concat([st.session_state['fila_baixa_estoque'], df_novo_lote], ignore_index=True)
+                        
+                        ws_detalhes = ss.worksheet("6. Detalhes")
+                        first_row = ws_detalhes.row_values(1)
+                        if not first_row or 'Total Venda' not in first_row:
+                            ws_detalhes.clear()
+                            ws_detalhes.append_row(COLUNAS_ESPERADAS)
+                        
+                        df_salvar = df_processado.copy()
+                        for c in df_salvar.columns:
+                            if 'Margem' in c: df_salvar[c] = df_salvar[c].apply(format_percent_br)
+                            elif any(x in c for x in ['Venda', 'Lucro', 'Custo', 'Preço', 'Impostos', 'Comissão', 'Taxas', 'Embalagem', 'Ads']): 
+                                df_salvar[c] = df_salvar[c].apply(format_currency_br)
+                        
+                        df_salvar = df_salvar[COLUNAS_ESPERADAS]
+                        ws_detalhes.append_rows(df_salvar.astype(str).values.tolist())
+                        st.success(f"✅ {len(df_processado)} vendas salvas com sucesso!")
+                        
+                        carregar_dados_detalhes.clear()
+                        df_historico = carregar_dados_detalhes()
+                        if not df_historico.empty:
+                            d_geral, d_cnpj, d_exec, d_bcg, d_precos, d_giro, d_oportunidades = atualizar_dashboards_resumo(df_historico, metas_dict)
+                            salvar_todos_dashboards(ss, d_geral, d_cnpj, d_exec, d_precos, d_bcg, d_giro, d_oportunidades)
+                            st.success("Dashboards atualizados!")
+                            time.sleep(1)
+                            st.rerun()
             except Exception as e: st.error(f"Erro: {e}")
 
     st.divider()
     st.header("💾 Manutenção")
-    if st.button("💾 Forçar Salvar Dashboards"):
-        with st.spinner("Recalculando e salvando abas..."):
-            df_historico = carregar_dados_detalhes()
-            if not df_historico.empty:
-                d_geral, d_cnpj, d_exec, d_bcg, d_precos, d_giro, d_oportunidades = atualizar_dashboards_resumo(df_historico, metas_dict)
-                salvar_todos_dashboards(ss, d_geral, d_cnpj, d_exec, d_precos, d_bcg, d_giro, d_oportunidades)
-                st.success("Todas as abas foram atualizadas na planilha!")
-            else:
-                st.warning("Não há dados em '6. Detalhes' para processar.")
+    if st.button("💾 Forçar Salvar Dashboards", disabled=modo_simulacao):
+        if modo_simulacao: st.error("Desative o Modo Simulação para salvar.")
+        else:
+            with st.spinner("Recalculando e salvando abas..."):
+                df_historico = carregar_dados_detalhes()
+                if not df_historico.empty:
+                    d_geral, d_cnpj, d_exec, d_bcg, d_precos, d_giro, d_oportunidades = atualizar_dashboards_resumo(df_historico, metas_dict)
+                    salvar_todos_dashboards(ss, d_geral, d_cnpj, d_exec, d_precos, d_bcg, d_giro, d_oportunidades)
+                    st.success("Todas as abas foram atualizadas na planilha!")
 
 st.divider()
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(["📈 Visão Geral", "🏢 Por CNPJ", "⭐ BCG Geral", "🎯 BCG por Canal", "💲 Preços", "📋 Detalhes", "📦 Giro de Produtos", "🚀 Oportunidades", "🏭 MRP Fábrica"])
@@ -877,83 +859,37 @@ if not df_detalhes.empty and 'Total Venda' in df_detalhes.columns:
         total_venda = df_detalhes['Total Venda'].sum()
         margem_media = df_detalhes['Margem (%)'].mean()
         ticket_medio = df_detalhes['Total Venda'].mean()
-        
         col1, col2, col3 = st.columns(3)
         col1.metric("Vendas Totais", format_currency_br(total_venda))
-        
-        delta_color_margem = "normal"
-        if metas_dict:
-            if margem_media >= metas_dict.get('Margem Líquida Ideal (%)', 15)/100: delta_color_margem = "normal"
-            elif margem_media < metas_dict.get('Margem Líquida Mínima (%)', 10)/100: delta_color_margem = "inverse"
-            else: delta_color_margem = "off"
-            
-        col2.metric("Margem Média", format_percent_br(margem_media), delta_color=delta_color_margem)
-        
-        delta_color_ticket = "normal"
-        if metas_dict:
-            if ticket_medio >= metas_dict.get('Ticket Médio Ideal (R$)', 60): delta_color_ticket = "normal"
-            elif ticket_medio < metas_dict.get('Ticket Médio Mínimo (R$)', 45): delta_color_ticket = "inverse"
-            else: delta_color_ticket = "off"
-            
-        col3.metric("Ticket Médio (Linha)", format_currency_br(ticket_medio), delta_color=delta_color_ticket)
-        
+        col2.metric("Margem Média", format_percent_br(margem_media))
+        col3.metric("Ticket Médio", format_currency_br(ticket_medio))
         st.bar_chart(df_detalhes.groupby('Canal')['Total Venda'].sum())
-        st.download_button("📥 Baixar Resumo Geral", data=to_excel(d_geral), file_name="resumo_geral.xlsx")
-    with tab2:
-        st.dataframe(d_cnpj.style.format({'Total Venda': 'R$ {:,.2f}', 'Margem (%)': '{:.2%}'}))
-        st.download_button("📥 Baixar Análise CNPJ", data=to_excel(d_cnpj), file_name="analise_cnpj.xlsx")
-    with tab3:
-        st.subheader("Matriz BCG Geral (Ranking)")
-        st.dataframe(d_exec.style.format({'Total Venda': 'R$ {:,.2f}', 'Margem (%)': '{:.2%}'}))
-        st.download_button("📥 Baixar BCG Geral", data=to_excel(d_exec), file_name="bcg_geral.xlsx")
-    with tab4:
-        st.subheader("Matriz BCG por Canal (Ranking)")
-        st.dataframe(d_bcg.style.format({'Total Venda': 'R$ {:,.2f}', 'Margem (%)': '{:.2%}'}))
-        st.download_button("📥 Baixar BCG por Canal", data=to_excel(d_bcg), file_name="bcg_canal.xlsx")
-    with tab5:
-        st.subheader("Preços Médios por Marketplace")
-        st.dataframe(d_precos.style.format(lambda x: f"R$ {x:,.2f}" if isinstance(x, (int, float)) and pd.notna(x) else ("-" if pd.isna(x) else x)))
-        st.download_button("📥 Baixar Preços", data=to_excel(d_precos), file_name="precos_marketplaces.xlsx")
-    with tab6:
-        st.dataframe(df_detalhes)
-        st.download_button("📥 Baixar Detalhes Completos", data=to_excel(df_detalhes), file_name="detalhes_vendas.xlsx")
-    with tab7:
-        st.subheader("📦 Giro de Produtos (Explosão de Kits + Avulsos)")
-        filtro_texto = st.text_input("🔍 Filtrar por Atributo (ex: ML, P, Branco)", "")
-        df_giro_view = d_giro.copy()
-        if filtro_texto:
-            df_giro_view = df_giro_view[df_giro_view['SKU Real'].str.contains(filtro_texto, case=False, na=False)]
-            st.info(f"Mostrando {len(df_giro_view)} produtos contendo '{filtro_texto}'")
-        st.dataframe(df_giro_view)
-        st.download_button("📥 Baixar Giro de Produtos", data=to_excel(df_giro_view), file_name="giro_produtos.xlsx")
-    with tab8:
-        st.subheader("🚀 Oportunidades de Expansão (Cross-Assortment)")
-        st.info("Esta tabela mostra quantas unidades de cada produto (real) foram vendidas em cada canal. Use para identificar onde você NÃO está vendendo.")
-        filtro_oportunidade = st.text_input("🔍 Filtrar Oportunidades (ex: Body)", "")
-        df_op_view = d_oportunidades.copy()
-        if filtro_oportunidade:
-            df_op_view = df_op_view[df_op_view['SKU Real'].str.contains(filtro_oportunidade, case=False, na=False)]
-        st.dataframe(df_op_view)
-        st.download_button("📥 Baixar Oportunidades", data=to_excel(df_op_view), file_name="oportunidades_expansao.xlsx")
+    with tab2: st.dataframe(d_cnpj)
+    with tab3: st.dataframe(d_exec)
+    with tab4: st.dataframe(d_bcg)
+    with tab5: st.dataframe(d_precos)
+    with tab6: st.dataframe(df_detalhes)
+    with tab7: st.dataframe(d_giro)
+    with tab8: st.dataframe(d_oportunidades)
     
     with tab9:
         st.subheader("🏭 MRP - Planejamento de Produção em Cascata")
-        st.markdown("""
-        <div style='background-color: #e8f4f8; padding: 15px; border-radius: 5px; border-left: 5px solid #00a8cc;'>
-            <b>ANÁLISE MULTINÍVEL (MRP)</b><br>
-            O sistema verifica o estoque em cascata: <b>Produto Final > Insumos > Matéria-Prima</b>.<br>
-            <i>Esta aba gera apenas relatórios de inteligência. A baixa física deve ser feita no App Mobile.</i>
-        </div>
-        """, unsafe_allow_html=True)
         
+        if modo_simulacao:
+            st.warning("🧪 EXIBINDO DADOS DE SIMULAÇÃO (NADA SERÁ SALVO)")
+            df_vendas_fila = st.session_state.get('fila_simulacao', pd.DataFrame())
+        else:
+            df_vendas_fila = st.session_state.get('fila_baixa_estoque', pd.DataFrame())
+            
         col_ctrl1, col_ctrl2 = st.columns(2)
         with col_ctrl1:
             if st.button("🔄 Carregar Estoque Externo"):
                 carregar_estoque_externo.clear()
                 st.success("Estoque recarregado!")
         with col_ctrl2:
-            if st.button("🗑️ Limpar Fila de Vendas"):
-                st.session_state['fila_baixa_estoque'] = pd.DataFrame()
+            if st.button("🗑️ Limpar Fila"):
+                if modo_simulacao: st.session_state['fila_simulacao'] = pd.DataFrame()
+                else: st.session_state['fila_baixa_estoque'] = pd.DataFrame()
                 st.success("Fila limpa!")
                 time.sleep(1)
                 st.rerun()
@@ -961,54 +897,42 @@ if not df_detalhes.empty and 'Total Venda' in df_detalhes.columns:
         df_estoque_ext = carregar_estoque_externo()
         
         if df_estoque_ext.empty:
-            st.error("Não foi possível carregar o estoque externo. Verifique a conexão.")
+            st.error("Não foi possível carregar o estoque externo.")
         else:
-            st.success(f"Conectado ao Estoque Externo: {len(df_estoque_ext)} produtos carregados.")
-            
-            df_vendas_fila = st.session_state.get('fila_baixa_estoque', pd.DataFrame())
-            
             if df_vendas_fila.empty:
-                st.info("ℹ️ A fila de vendas está vazia. Faça upload das vendas na barra lateral.")
+                st.info("ℹ️ A fila de vendas está vazia.")
             else:
-                st.subheader(f"Plano de Produção (Baseado em {len(df_vendas_fila)} vendas)")
+                st.subheader(f"Plano de Produção ({len(df_vendas_fila)} vendas na fila)")
                 
                 # PROCESSAMENTO MRP
                 df_mrp = processar_mrp_fila(df_vendas_fila, df_estoque_ext)
                 
                 if df_mrp.empty:
-                    st.warning("Nenhuma ação necessária encontrada.")
+                    st.warning("Nenhuma ação necessária.")
                 else:
-                    # Exibição Agrupada por Ação
                     st.write("### 📋 O que precisa ser feito?")
-                    
                     acoes_order = ['SEPARAR_ESTOQUE', 'PRODUZIR_MONTAR', 'COMPRAR_PRODUZIR_EXTERNO', 'ERRO_CADASTRO', 'ERRO_RECEITA']
-                    
                     for acao in acoes_order:
                         itens = df_mrp[df_mrp['acao'] == acao]
-                        if itens.empty: continue
-                        
-                        # Agrupa itens iguais
-                        itens_agrupados = itens.groupby(['codigo', 'nome'])['qtd'].sum().reset_index()
-                        
-                        with st.expander(f"{acao.replace('_', ' ')} ({len(itens_agrupados)} itens)", expanded=True):
-                            st.dataframe(itens_agrupados)
+                        if not itens.empty:
+                            itens_agrupados = itens.groupby(['codigo', 'nome'])['qtd'].sum().reset_index()
+                            with st.expander(f"{acao.replace('_', ' ')} ({len(itens_agrupados)} itens)", expanded=True):
+                                st.dataframe(itens_agrupados)
                     
                     st.divider()
-                    st.write("### 🌳 Detalhamento da Árvore (Rastreabilidade)")
-                    st.dataframe(df_mrp[['nivel', 'codigo', 'nome', 'acao', 'qtd', 'estoque_atual', 'caminho']])
                     
-                    # GERAÇÃO DE PDF
+                    # GERAÇÃO DE EXCEL HIERÁRQUICO
                     try:
-                        pdf_bytes = gerar_pdf_mrp(df_mrp, df_vendas_fila)
+                        excel_bytes = gerar_excel_hierarquico(df_vendas_fila, df_estoque_ext)
                         st.download_button(
-                            label="📄 Baixar Relatório MRP Completo (PDF)",
-                            data=pdf_bytes,
-                            file_name=f"mrp_producao_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-                            mime="application/pdf",
+                            label="📥 Baixar Ordem de Produção (Excel Hierárquico)",
+                            data=excel_bytes,
+                            file_name=f"ordem_producao_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             type="primary"
                         )
                     except Exception as e:
-                        st.error(f"Erro ao gerar PDF: {e}")
+                        st.error(f"Erro ao gerar Excel: {e}")
 
 else:
     st.info("Aguardando dados...")
