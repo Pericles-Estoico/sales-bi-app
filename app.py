@@ -10,14 +10,16 @@ import time
 import requests
 import math
 from io import StringIO
+from fpdf import FPDF
 
 # ==============================================================================
-# VERSÃO V30 - SUPER APP COM FILA ACUMULATIVA E RASTREABILIDADE
+# VERSÃO V32 - SUPER APP COM MRP (PLANEJAMENTO DE RECURSOS EM CASCATA)
 # ==============================================================================
-# MANTÉM TODA A LÓGICA DA V29 E ADICIONA ACUMULAÇÃO DE VENDAS PARA ESTOQUE
+# ADICIONA LÓGICA RECURSIVA PARA VERIFICAR ESTOQUE EM MÚLTIPLOS NÍVEIS
+# (PRODUTO -> INSUMO -> MATÉRIA-PRIMA) SEM BAIXA AUTOMÁTICA DE INSUMOS
 # ==============================================================================
 
-st.set_page_config(page_title="Sales BI Pro + Estoque", page_icon="🏭", layout="wide")
+st.set_page_config(page_title="Sales BI Pro + MRP Fábrica", page_icon="🏭", layout="wide")
 
 # ==============================================================================
 # CONFIGURAÇÕES DO MÓDULO DE ESTOQUE (IMPORTADO DO OUTRO APP)
@@ -92,7 +94,7 @@ def normalizar(texto):
     return texto.lower().strip()
 
 # ==============================================================================
-# FUNÇÕES ESPECÍFICAS DO MÓDULO DE ESTOQUE (IMPORTADAS E ADAPTADAS)
+# FUNÇÕES ESPECÍFICAS DO MÓDULO DE ESTOQUE (MRP RECURSIVO)
 # ==============================================================================
 def safe_int(x, default=0):
     try:
@@ -145,68 +147,182 @@ def carregar_estoque_externo():
         st.error(f"Erro ao carregar estoque externo: {e}")
         return pd.DataFrame()
 
-def expandir_kits_estoque_acumulado(df_vendas_acumulado, df_estoque):
-    # Prepara mapa de kits do estoque externo
-    key_to_code = dict(zip(df_estoque['codigo_key'], df_estoque['codigo'].astype(str)))
-    kits = {}
-    for _, row in df_estoque.iterrows():
-        if str(row.get('eh_kit', '')).strip().lower() == 'sim':
-            kit_key = row['codigo_key']
+# --- LÓGICA MRP RECURSIVA ---
+def calcular_mrp_recursivo(codigo_key, qtd_necessaria, df_estoque, nivel=0, caminho=""):
+    """
+    Calcula a necessidade de produção em cascata (Pai -> Filho -> Neto).
+    Retorna uma lista de ações necessárias.
+    """
+    acoes = []
+    
+    # Busca o produto no estoque
+    produto = df_estoque[df_estoque['codigo_key'] == codigo_key]
+    if produto.empty:
+        # Produto não cadastrado: gera alerta e para
+        acoes.append({
+            'nivel': nivel,
+            'codigo': codigo_key,
+            'nome': f"PRODUTO NÃO ENCONTRADO ({codigo_key})",
+            'acao': 'ERRO_CADASTRO',
+            'qtd': qtd_necessaria,
+            'estoque_atual': 0,
+            'caminho': caminho
+        })
+        return acoes
+
+    row = produto.iloc[0]
+    nome = row['nome']
+    estoque_atual = safe_int(row['estoque_atual'])
+    eh_kit = str(row.get('eh_kit', '')).strip().lower() == 'sim'
+    
+    # 1. Verifica se tem estoque do produto pronto
+    qtd_usar_estoque = min(estoque_atual, qtd_necessaria)
+    qtd_faltante = qtd_necessaria - qtd_usar_estoque
+    
+    if qtd_usar_estoque > 0:
+        acoes.append({
+            'nivel': nivel,
+            'codigo': row['codigo'],
+            'nome': nome,
+            'acao': 'SEPARAR_ESTOQUE',
+            'qtd': qtd_usar_estoque,
+            'estoque_atual': estoque_atual,
+            'caminho': caminho
+        })
+        
+    # 2. Se faltar, verifica como produzir (Explosão)
+    if qtd_faltante > 0:
+        if eh_kit:
+            # É um Kit/Composto: Precisa dos componentes
             comps = [normalize_key(c.strip()) for c in str(row.get('componentes', '')).split(',') if c.strip()]
             quants = parse_int_list(row.get('quantidades', ''))
+            
             if comps and quants and len(comps) == len(quants):
-                kits[kit_key] = list(zip(comps, quants))
-    
-    linhas = []
-    # df_vendas_acumulado tem colunas: Produto, Quantidade, Canal
-    for _, row in df_vendas_acumulado.iterrows():
-        qty = safe_int(row.get('Quantidade', 0), 0)
-        code_key = normalize_key(row['Produto'])
-        canal = row.get('Canal', 'Desconhecido')
-        
-        if code_key in kits:
-            for comp_key, comp_qty in kits[code_key]:
-                linhas.append({
-                    'codigo_key': comp_key, 
-                    'quantidade': qty * safe_int(comp_qty, 0),
-                    'origem': canal
+                acoes.append({
+                    'nivel': nivel,
+                    'codigo': row['codigo'],
+                    'nome': nome,
+                    'acao': 'PRODUZIR_MONTAR',
+                    'qtd': qtd_faltante,
+                    'estoque_atual': estoque_atual,
+                    'caminho': caminho
+                })
+                
+                # Recursão para cada componente
+                for comp_key, comp_qtd_unit in zip(comps, quants):
+                    qtd_comp_total = qtd_faltante * comp_qtd_unit
+                    novo_caminho = f"{caminho} > {nome}" if caminho else nome
+                    acoes_filho = calcular_mrp_recursivo(comp_key, qtd_comp_total, df_estoque, nivel + 1, novo_caminho)
+                    acoes.extend(acoes_filho)
+            else:
+                # Kit sem receita válida
+                acoes.append({
+                    'nivel': nivel,
+                    'codigo': row['codigo'],
+                    'nome': nome,
+                    'acao': 'ERRO_RECEITA',
+                    'qtd': qtd_faltante,
+                    'estoque_atual': estoque_atual,
+                    'caminho': caminho
                 })
         else:
-            linhas.append({
-                'codigo_key': code_key, 
-                'quantidade': qty,
-                'origem': canal
+            # É Matéria-Prima ou Produto Final sem receita (Compra)
+            acoes.append({
+                'nivel': nivel,
+                'codigo': row['codigo'],
+                'nome': nome,
+                'acao': 'COMPRAR_PRODUZIR_EXTERNO',
+                'qtd': qtd_faltante,
+                'estoque_atual': estoque_atual,
+                'caminho': caminho
             })
             
-    if not linhas: return pd.DataFrame()
+    return acoes
+
+def processar_mrp_fila(df_vendas_fila, df_estoque):
+    # Agrupa vendas por produto
+    vendas_agrupadas = df_vendas_fila.groupby('Produto')['Quantidade'].sum().reset_index()
     
-    df = pd.DataFrame(linhas)
+    plano_mrp = []
     
-    # Agrupa somando quantidade e concatenando origens únicas
-    df_agrupado = df.groupby('codigo_key').agg({
-        'quantidade': 'sum',
-        'origem': lambda x: ', '.join(sorted(set(x)))
-    }).reset_index()
-    
-    # Enriquece com dados do estoque
-    est_map = {}
-    for _, r in df_estoque.iterrows():
-        est_map[r['codigo_key']] = {
-            'nome': r.get('nome', 'N/A'),
-            'estoque_atual': r.get('estoque_atual', 0),
-            'codigo_canonical': r.get('codigo', '')
-        }
+    for _, row in vendas_agrupadas.iterrows():
+        cod_key = normalize_key(row['Produto'])
+        qtd = safe_int(row['Quantidade'])
         
-    df_agrupado['encontrado'] = df_agrupado['codigo_key'].isin(est_map.keys())
-    
-    df_ok = df_agrupado[df_agrupado['encontrado']].copy()
-    if not df_ok.empty:
-        df_ok['nome'] = df_ok['codigo_key'].map(lambda k: est_map[k]['nome'])
-        df_ok['estoque_atual'] = df_ok['codigo_key'].map(lambda k: est_map[k]['estoque_atual'])
-        df_ok['codigo_canonical'] = df_ok['codigo_key'].map(lambda k: est_map[k]['codigo_canonical'])
-        df_ok['estoque_final'] = df_ok['estoque_atual'] - df_ok['quantidade']
+        # Chama a função recursiva para cada produto vendido
+        acoes = calcular_mrp_recursivo(cod_key, qtd, df_estoque)
+        plano_mrp.extend(acoes)
         
-    return df_ok
+    return pd.DataFrame(plano_mrp)
+
+def gerar_pdf_mrp(df_mrp, df_vendas_fila):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=10)
+    
+    # Cabeçalho
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(0, 10, "RELATÓRIO DE PRODUÇÃO MRP (CASCATA)", ln=True, align='C')
+    pdf.set_font("Arial", size=10)
+    pdf.cell(0, 10, f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}", ln=True, align='C')
+    pdf.ln(5)
+    
+    # 1. Resumo de Ações (O que fazer)
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 10, "1. PLANO DE AÇÃO (O QUE FAZER)", ln=True)
+    
+    # Agrupa por tipo de ação
+    acoes_order = ['SEPARAR_ESTOQUE', 'PRODUZIR_MONTAR', 'COMPRAR_PRODUZIR_EXTERNO', 'ERRO_CADASTRO', 'ERRO_RECEITA']
+    
+    for acao in acoes_order:
+        itens = df_mrp[df_mrp['acao'] == acao]
+        if itens.empty: continue
+        
+        # Agrupa itens iguais (ex: soma todos os tecidos necessários de diferentes produtos)
+        itens_agrupados = itens.groupby(['codigo', 'nome'])['qtd'].sum().reset_index()
+        
+        pdf.set_font("Arial", 'B', 10)
+        pdf.set_fill_color(230, 230, 230)
+        titulo = acao.replace('_', ' ')
+        pdf.cell(0, 8, f"AÇÃO: {titulo}", ln=True, fill=True)
+        
+        pdf.set_font("Arial", 'B', 8)
+        pdf.cell(30, 6, "Código", border=1)
+        pdf.cell(120, 6, "Item", border=1)
+        pdf.cell(30, 6, "Quantidade", border=1, align='C')
+        pdf.ln()
+        
+        pdf.set_font("Arial", size=8)
+        for _, row in itens_agrupados.iterrows():
+            pdf.cell(30, 6, str(row['codigo']), border=1)
+            pdf.cell(120, 6, str(row['nome'])[:60], border=1)
+            pdf.cell(30, 6, str(int(row['qtd'])), border=1, align='C')
+            pdf.ln()
+        pdf.ln(3)
+        
+    pdf.ln(5)
+    
+    # 2. Detalhamento da Árvore (Para conferência)
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 10, "2. DETALHAMENTO DA ÁRVORE (RASTRO)", ln=True)
+    pdf.set_font("Arial", size=7)
+    
+    col_w = [10, 30, 80, 30, 20, 20]
+    headers = ["Nvl", "Código", "Item", "Ação", "Qtd", "Estoque"]
+    for i, h in enumerate(headers): pdf.cell(col_w[i], 6, h, border=1, align='C')
+    pdf.ln()
+    
+    for _, row in df_mrp.iterrows():
+        indent = ">" * int(row['nivel'])
+        pdf.cell(col_w[0], 6, str(row['nivel']), border=1, align='C')
+        pdf.cell(col_w[1], 6, str(row['codigo']), border=1)
+        pdf.cell(col_w[2], 6, f"{indent} {str(row['nome'])[:40]}", border=1)
+        pdf.cell(col_w[3], 6, str(row['acao'])[:15], border=1)
+        pdf.cell(col_w[4], 6, str(int(row['qtd'])), border=1, align='C')
+        pdf.cell(col_w[5], 6, str(int(row['estoque_atual'])), border=1, align='C')
+        pdf.ln()
+
+    return pdf.output(dest='S').encode('latin-1')
 
 def movimentar_estoque_webhook(codigo, quantidade, tipo, colaborador):
     try:
@@ -646,7 +762,7 @@ except Exception as e:
     st.error(f"Erro conexão: {e}")
     st.stop()
 
-st.title("📊 Sales BI Pro + 🏭 Fábrica")
+st.title("📊 Sales BI Pro + 🏭 MRP Fábrica")
 
 with st.sidebar:
     st.header("🔌 Status da Conexão")
@@ -751,7 +867,7 @@ with st.sidebar:
                 st.warning("Não há dados em '6. Detalhes' para processar.")
 
 st.divider()
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(["📈 Visão Geral", "🏢 Por CNPJ", "⭐ BCG Geral", "🎯 BCG por Canal", "💲 Preços", "📋 Detalhes", "📦 Giro de Produtos", "🚀 Oportunidades", "🏭 Fábrica & Estoque"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(["📈 Visão Geral", "🏢 Por CNPJ", "⭐ BCG Geral", "🎯 BCG por Canal", "💲 Preços", "📋 Detalhes", "📦 Giro de Produtos", "🚀 Oportunidades", "🏭 MRP Fábrica"])
 df_detalhes = carregar_dados_detalhes()
 
 if not df_detalhes.empty and 'Total Venda' in df_detalhes.columns:
@@ -821,11 +937,12 @@ if not df_detalhes.empty and 'Total Venda' in df_detalhes.columns:
         st.download_button("📥 Baixar Oportunidades", data=to_excel(df_op_view), file_name="oportunidades_expansao.xlsx")
     
     with tab9:
-        st.subheader("🏭 Fábrica & Controle de Estoque")
+        st.subheader("🏭 MRP - Planejamento de Produção em Cascata")
         st.markdown("""
-        <div style='background-color: #f0f2f6; padding: 15px; border-radius: 5px; border-left: 5px solid #ff4b4b;'>
-            <b>MÓDULO DE INTEGRAÇÃO EXTERNA</b><br>
-            Esta aba conecta com sua planilha de estoque separada. As ações aqui <b>não afetam</b> os dados financeiros do BI.
+        <div style='background-color: #e8f4f8; padding: 15px; border-radius: 5px; border-left: 5px solid #00a8cc;'>
+            <b>ANÁLISE MULTINÍVEL (MRP)</b><br>
+            O sistema verifica o estoque em cascata: <b>Produto Final > Insumos > Matéria-Prima</b>.<br>
+            <i>Esta aba gera apenas relatórios de inteligência. A baixa física deve ser feita no App Mobile.</i>
         </div>
         """, unsafe_allow_html=True)
         
@@ -835,9 +952,9 @@ if not df_detalhes.empty and 'Total Venda' in df_detalhes.columns:
                 carregar_estoque_externo.clear()
                 st.success("Estoque recarregado!")
         with col_ctrl2:
-            if st.button("🗑️ Limpar Fila de Baixa (Começar do Zero)"):
+            if st.button("🗑️ Limpar Fila de Vendas"):
                 st.session_state['fila_baixa_estoque'] = pd.DataFrame()
-                st.success("Fila de baixa limpa! Pode começar a subir novos arquivos.")
+                st.success("Fila limpa!")
                 time.sleep(1)
                 st.rerun()
             
@@ -848,66 +965,50 @@ if not df_detalhes.empty and 'Total Venda' in df_detalhes.columns:
         else:
             st.success(f"Conectado ao Estoque Externo: {len(df_estoque_ext)} produtos carregados.")
             
-            # Verifica se tem vendas acumuladas na fila
             df_vendas_fila = st.session_state.get('fila_baixa_estoque', pd.DataFrame())
             
             if df_vendas_fila.empty:
-                st.info("ℹ️ A fila de baixa está vazia. Faça upload das vendas na barra lateral para adicionar itens aqui.")
+                st.info("ℹ️ A fila de vendas está vazia. Faça upload das vendas na barra lateral.")
             else:
-                st.subheader(f"Análise de Baixa (Fila Acumulada: {len(df_vendas_fila)} registros)")
-                df_baixa = expandir_kits_estoque_acumulado(df_vendas_fila, df_estoque_ext)
+                st.subheader(f"Plano de Produção (Baseado em {len(df_vendas_fila)} vendas)")
                 
-                if df_baixa.empty:
-                    st.warning("Nenhum produto das vendas foi encontrado no estoque externo.")
+                # PROCESSAMENTO MRP
+                df_mrp = processar_mrp_fila(df_vendas_fila, df_estoque_ext)
+                
+                if df_mrp.empty:
+                    st.warning("Nenhuma ação necessária encontrada.")
                 else:
-                    # Formatação para exibição
-                    df_view = df_baixa[['codigo_canonical', 'nome', 'estoque_atual', 'quantidade', 'estoque_final', 'origem']].copy()
-                    df_view.columns = ['Código', 'Produto', 'Estoque Atual', 'Qtd a Baixar', 'Estoque Final', 'Origem da Demanda']
+                    # Exibição Agrupada por Ação
+                    st.write("### 📋 O que precisa ser feito?")
                     
-                    # Alerta de estoque negativo
-                    negativos = df_view[df_view['Estoque Final'] < 0]
-                    if not negativos.empty:
-                        st.error(f"🚨 ATENÇÃO: {len(negativos)} produtos ficarão com estoque NEGATIVO!")
-                        st.dataframe(negativos)
+                    acoes_order = ['SEPARAR_ESTOQUE', 'PRODUZIR_MONTAR', 'COMPRAR_PRODUZIR_EXTERNO', 'ERRO_CADASTRO', 'ERRO_RECEITA']
                     
-                    st.dataframe(df_view)
+                    for acao in acoes_order:
+                        itens = df_mrp[df_mrp['acao'] == acao]
+                        if itens.empty: continue
+                        
+                        # Agrupa itens iguais
+                        itens_agrupados = itens.groupby(['codigo', 'nome'])['qtd'].sum().reset_index()
+                        
+                        with st.expander(f"{acao.replace('_', ' ')} ({len(itens_agrupados)} itens)", expanded=True):
+                            st.dataframe(itens_agrupados)
                     
-                    col_btn1, col_btn2 = st.columns(2)
-                    with col_btn1:
-                        if st.button("✅ CONFIRMAR BAIXA NO ESTOQUE", type="primary"):
-                            progress_bar = st.progress(0)
-                            status_text = st.empty()
-                            sucessos = 0
-                            erros = 0
-                            
-                            total_items = len(df_baixa)
-                            for idx, row in df_baixa.iterrows():
-                                status_text.text(f"Baixando {row['codigo_canonical']}...")
-                                res = movimentar_estoque_webhook(
-                                    row['codigo_canonical'], 
-                                    row['quantidade'], 
-                                    'saida', 
-                                    'SalesBI_Auto'
-                                )
-                                if res.get('success'): sucessos += 1
-                                else: erros += 1
-                                progress_bar.progress((idx + 1) / total_items)
-                                
-                            status_text.empty()
-                            progress_bar.empty()
-                            
-                            if erros == 0:
-                                st.success(f"Sucesso! {sucessos} itens baixados no estoque externo.")
-                                carregar_estoque_externo.clear() # Limpa cache para recarregar saldo novo
-                                st.session_state['fila_baixa_estoque'] = pd.DataFrame() # Limpa fila após sucesso
-                                time.sleep(2)
-                                st.rerun()
-                            else:
-                                st.warning(f"Processo finalizado com {sucessos} sucessos e {erros} erros.")
+                    st.divider()
+                    st.write("### 🌳 Detalhamento da Árvore (Rastreabilidade)")
+                    st.dataframe(df_mrp[['nivel', 'codigo', 'nome', 'acao', 'qtd', 'estoque_atual', 'caminho']])
                     
-                    with col_btn2:
-                        if st.button("📄 Gerar Ordem de Produção (PDF/Print)"):
-                            st.info("Funcionalidade de PDF em desenvolvimento. Use o print da tabela acima por enquanto.")
+                    # GERAÇÃO DE PDF
+                    try:
+                        pdf_bytes = gerar_pdf_mrp(df_mrp, df_vendas_fila)
+                        st.download_button(
+                            label="📄 Baixar Relatório MRP Completo (PDF)",
+                            data=pdf_bytes,
+                            file_name=f"mrp_producao_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+                            mime="application/pdf",
+                            type="primary"
+                        )
+                    except Exception as e:
+                        st.error(f"Erro ao gerar PDF: {e}")
 
 else:
     st.info("Aguardando dados...")
