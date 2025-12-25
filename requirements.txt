@@ -4,3 +4,5 @@ gspread
 oauth2client
 openpyxl
 xlsxwriter
+requests
+fpdf
