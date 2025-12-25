@@ -7,24 +7,26 @@ import json
 import unicodedata
 import io
 import time
+import requests
+import math
+from io import StringIO
 
 # ==============================================================================
-# VERSÃO V28 - OPORTUNIDADES & SALVAMENTO MANUAL
-# CORREÇÕES ACUMULADAS:
-# ... (Versões anteriores) ...
-# 24. Aba '7. Giro de Produtos' (Consumo Real de Estoque)
-# 25. Botão 'Forçar Salvar Dashboards' (Atualiza planilha sem upload)
-# 26. Matriz de Oportunidades (Cross-Assortment por Canal)
-# 27. Filtro Inteligente de Atributos (Cor, Tamanho, etc.)
+# VERSÃO V30 - SUPER APP COM FILA ACUMULATIVA E RASTREABILIDADE
+# ==============================================================================
+# MANTÉM TODA A LÓGICA DA V29 E ADICIONA ACUMULAÇÃO DE VENDAS PARA ESTOQUE
 # ==============================================================================
 
-# ==============================================================================
-# CONFIGURAÇÃO DA PÁGINA
-# ==============================================================================
-st.set_page_config(page_title="Sales BI Pro", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Sales BI Pro + Estoque", page_icon="🏭", layout="wide")
 
 # ==============================================================================
-# CONSTANTES E MAPEAMENTOS
+# CONFIGURAÇÕES DO MÓDULO DE ESTOQUE (IMPORTADO DO OUTRO APP)
+# ==============================================================================
+ESTOQUE_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1PpiMQingHf4llA03BiPIuPJPIZqul4grRU_emWDEK1o/export?format=csv"
+ESTOQUE_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbxTX9uUWnByw6sk6MtuJ5FbjV7zeBKYEoUPPlUlUDS738QqocfCd_NAlh9Eh25XhQywTw/exec"
+
+# ==============================================================================
+# CONSTANTES E MAPEAMENTOS (BI FINANCEIRO)
 # ==============================================================================
 CHANNELS = {
     'geral': '📊 Vendas Gerais',
@@ -43,7 +45,7 @@ COLUNAS_ESPERADAS = [
 ORDEM_BCG = ['Vaca Leiteira 🐄', 'Estrela ⭐', 'Interrogação ❓', 'Abacaxi 🍍']
 
 # ==============================================================================
-# FUNÇÕES UTILITÁRIAS
+# FUNÇÕES UTILITÁRIAS (GERAL)
 # ==============================================================================
 def clean_currency(value):
     if pd.isna(value) or value == '': return 0.0
@@ -90,7 +92,137 @@ def normalizar(texto):
     return texto.lower().strip()
 
 # ==============================================================================
-# CONEXÃO COM GOOGLE SHEETS
+# FUNÇÕES ESPECÍFICAS DO MÓDULO DE ESTOQUE (IMPORTADAS E ADAPTADAS)
+# ==============================================================================
+def safe_int(x, default=0):
+    try:
+        if x is None: return default
+        if isinstance(x, float) and math.isnan(x): return default
+        if isinstance(x, str) and x.strip().lower() in {"", "nan", "none", "null", "n/a"}: return default
+        return int(float(str(x).replace(",", ".")))
+    except: return default
+
+def parse_int_list(value):
+    if value is None: return []
+    if isinstance(value, float) and math.isnan(value): return []
+    parts = [p.strip() for p in str(value).split(",")]
+    out = []
+    for p in parts:
+        if not p: continue
+        v = safe_int(p, None)
+        if v is not None: out.append(v)
+    return out
+
+def normalize_key(s: str) -> str:
+    if s is None: return ""
+    s = str(s)
+    s = unicodedata.normalize('NFKD', s)
+    s = ''.join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.replace('ß', 'ss')
+    s = ''.join(ch for ch in s if ch.isalnum() or ch == '-')
+    return s.upper().strip()
+
+@st.cache_data(ttl=60)
+def carregar_estoque_externo():
+    try:
+        r = requests.get(ESTOQUE_SHEETS_URL, timeout=15)
+        r.raise_for_status()
+        df = pd.read_csv(StringIO(r.text))
+        
+        req = ['codigo', 'nome', 'categoria', 'estoque_atual', 'estoque_min', 'estoque_max']
+        for c in req:
+            if c not in df.columns: df[c] = 0
+            
+        df['estoque_atual'] = pd.to_numeric(df['estoque_atual'], errors='coerce').fillna(0)
+        
+        for c in ['componentes', 'quantidades', 'eh_kit']:
+            if c not in df.columns: df[c] = ''
+            else: df[c] = df[c].astype(str).fillna('')
+            
+        df['codigo_key'] = df['codigo'].astype(str).map(normalize_key)
+        return df
+    except Exception as e:
+        st.error(f"Erro ao carregar estoque externo: {e}")
+        return pd.DataFrame()
+
+def expandir_kits_estoque_acumulado(df_vendas_acumulado, df_estoque):
+    # Prepara mapa de kits do estoque externo
+    key_to_code = dict(zip(df_estoque['codigo_key'], df_estoque['codigo'].astype(str)))
+    kits = {}
+    for _, row in df_estoque.iterrows():
+        if str(row.get('eh_kit', '')).strip().lower() == 'sim':
+            kit_key = row['codigo_key']
+            comps = [normalize_key(c.strip()) for c in str(row.get('componentes', '')).split(',') if c.strip()]
+            quants = parse_int_list(row.get('quantidades', ''))
+            if comps and quants and len(comps) == len(quants):
+                kits[kit_key] = list(zip(comps, quants))
+    
+    linhas = []
+    # df_vendas_acumulado tem colunas: Produto, Quantidade, Canal
+    for _, row in df_vendas_acumulado.iterrows():
+        qty = safe_int(row.get('Quantidade', 0), 0)
+        code_key = normalize_key(row['Produto'])
+        canal = row.get('Canal', 'Desconhecido')
+        
+        if code_key in kits:
+            for comp_key, comp_qty in kits[code_key]:
+                linhas.append({
+                    'codigo_key': comp_key, 
+                    'quantidade': qty * safe_int(comp_qty, 0),
+                    'origem': canal
+                })
+        else:
+            linhas.append({
+                'codigo_key': code_key, 
+                'quantidade': qty,
+                'origem': canal
+            })
+            
+    if not linhas: return pd.DataFrame()
+    
+    df = pd.DataFrame(linhas)
+    
+    # Agrupa somando quantidade e concatenando origens únicas
+    df_agrupado = df.groupby('codigo_key').agg({
+        'quantidade': 'sum',
+        'origem': lambda x: ', '.join(sorted(set(x)))
+    }).reset_index()
+    
+    # Enriquece com dados do estoque
+    est_map = {}
+    for _, r in df_estoque.iterrows():
+        est_map[r['codigo_key']] = {
+            'nome': r.get('nome', 'N/A'),
+            'estoque_atual': r.get('estoque_atual', 0),
+            'codigo_canonical': r.get('codigo', '')
+        }
+        
+    df_agrupado['encontrado'] = df_agrupado['codigo_key'].isin(est_map.keys())
+    
+    df_ok = df_agrupado[df_agrupado['encontrado']].copy()
+    if not df_ok.empty:
+        df_ok['nome'] = df_ok['codigo_key'].map(lambda k: est_map[k]['nome'])
+        df_ok['estoque_atual'] = df_ok['codigo_key'].map(lambda k: est_map[k]['estoque_atual'])
+        df_ok['codigo_canonical'] = df_ok['codigo_key'].map(lambda k: est_map[k]['codigo_canonical'])
+        df_ok['estoque_final'] = df_ok['estoque_atual'] - df_ok['quantidade']
+        
+    return df_ok
+
+def movimentar_estoque_webhook(codigo, quantidade, tipo, colaborador):
+    try:
+        payload = {
+            'codigo': codigo,
+            'quantidade': safe_int(quantidade, 0),
+            'tipo': tipo,
+            'colaborador': colaborador
+        }
+        r = requests.post(ESTOQUE_WEBHOOK_URL, json=payload, timeout=20)
+        return r.json()
+    except Exception as e:
+        return {'success': False, 'message': f'Erro: {str(e)}'}
+
+# ==============================================================================
+# CONEXÃO COM GOOGLE SHEETS (BI FINANCEIRO)
 # ==============================================================================
 @st.cache_resource
 def conectar_google_sheets():
@@ -182,7 +314,7 @@ def carregar_configuracoes():
     except: return None, None
 
 # ==============================================================================
-# LÓGICA DE NEGÓCIO
+# LÓGICA DE NEGÓCIO (BI FINANCEIRO)
 # ==============================================================================
 def classificar_bcg(row, median_vendas, median_margem):
     vendas = row['Total Venda']
@@ -398,7 +530,6 @@ def calcular_oportunidades(df_detalhes):
     df_giro_canal = pd.DataFrame(giro_canal)
     df_pivot = df_giro_canal.pivot_table(index='SKU Real', columns='Canal', values='Qtd Vendida', aggfunc='sum', fill_value=0).reset_index()
     
-    # Adicionar coluna Total
     cols_canais = [c for c in df_pivot.columns if c != 'SKU Real']
     df_pivot['Total Geral'] = df_pivot[cols_canais].sum(axis=1)
     df_pivot = df_pivot.sort_values('Total Geral', ascending=False)
@@ -515,7 +646,7 @@ except Exception as e:
     st.error(f"Erro conexão: {e}")
     st.stop()
 
-st.title("📊 Sales BI Pro - Dashboard Executivo V28")
+st.title("📊 Sales BI Pro + 🏭 Fábrica")
 
 with st.sidebar:
     st.header("🔌 Status da Conexão")
@@ -539,6 +670,7 @@ with st.sidebar:
     if st.button("🔄 Atualizar Dados (Limpar Cache)"):
         carregar_dados_detalhes.clear()
         carregar_configuracoes.clear()
+        carregar_estoque_externo.clear()
         st.success("Cache limpo! Recarregando...")
         time.sleep(1)
         st.rerun()
@@ -550,6 +682,10 @@ with st.sidebar:
     custo_ads = st.number_input("💰 Ads (R$)", min_value=0.0, step=10.0)
     uploaded_file = st.file_uploader("Arquivo Excel", type=['xlsx'])
     
+    # Variável de sessão para guardar a FILA ACUMULADA de vendas para baixa
+    if 'fila_baixa_estoque' not in st.session_state:
+        st.session_state['fila_baixa_estoque'] = pd.DataFrame()
+
     if uploaded_file and st.button("🚀 Processar e Salvar"):
         with st.spinner("Processando..."):
             try:
@@ -565,6 +701,16 @@ with st.sidebar:
                                        file_name="erros_impediram_salvamento.xlsx")
                 
                 elif df_processado is not None and not df_processado.empty:
+                    # ACUMULA NA FILA DE BAIXA (NÃO SUBSTITUI)
+                    df_novo_lote = df_processado.copy()
+                    df_novo_lote['Canal'] = CHANNELS[canal] # Garante que o canal está correto
+                    
+                    if st.session_state['fila_baixa_estoque'].empty:
+                        st.session_state['fila_baixa_estoque'] = df_novo_lote
+                    else:
+                        st.session_state['fila_baixa_estoque'] = pd.concat([st.session_state['fila_baixa_estoque'], df_novo_lote], ignore_index=True)
+                    
+                    # Salva no Google Sheets (Financeiro)
                     ws_detalhes = ss.worksheet("6. Detalhes")
                     first_row = ws_detalhes.row_values(1)
                     if not first_row or 'Total Venda' not in first_row or 'Lucro Bruto' not in first_row:
@@ -579,7 +725,7 @@ with st.sidebar:
                     
                     df_salvar = df_salvar[COLUNAS_ESPERADAS]
                     ws_detalhes.append_rows(df_salvar.astype(str).values.tolist())
-                    st.success(f"✅ {len(df_processado)} vendas salvas com sucesso!")
+                    st.success(f"✅ {len(df_processado)} vendas salvas com sucesso! Adicionadas à Fila de Baixa.")
                     
                     carregar_dados_detalhes.clear()
                     df_historico = carregar_dados_detalhes()
@@ -605,7 +751,7 @@ with st.sidebar:
                 st.warning("Não há dados em '6. Detalhes' para processar.")
 
 st.divider()
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(["📈 Visão Geral", "🏢 Por CNPJ", "⭐ BCG Geral", "🎯 BCG por Canal", "💲 Preços", "📋 Detalhes", "📦 Giro de Produtos", "🚀 Oportunidades"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(["📈 Visão Geral", "🏢 Por CNPJ", "⭐ BCG Geral", "🎯 BCG por Canal", "💲 Preços", "📋 Detalhes", "📦 Giro de Produtos", "🚀 Oportunidades", "🏭 Fábrica & Estoque"])
 df_detalhes = carregar_dados_detalhes()
 
 if not df_detalhes.empty and 'Total Venda' in df_detalhes.columns:
@@ -614,7 +760,7 @@ if not df_detalhes.empty and 'Total Venda' in df_detalhes.columns:
     with tab1:
         total_venda = df_detalhes['Total Venda'].sum()
         margem_media = df_detalhes['Margem (%)'].mean()
-        ticket_medio = df_detalhes['Total Venda'].mean() # Média por linha de venda
+        ticket_medio = df_detalhes['Total Venda'].mean()
         
         col1, col2, col3 = st.columns(3)
         col1.metric("Vendas Totais", format_currency_br(total_venda))
@@ -657,29 +803,111 @@ if not df_detalhes.empty and 'Total Venda' in df_detalhes.columns:
         st.download_button("📥 Baixar Detalhes Completos", data=to_excel(df_detalhes), file_name="detalhes_vendas.xlsx")
     with tab7:
         st.subheader("📦 Giro de Produtos (Explosão de Kits + Avulsos)")
-        
         filtro_texto = st.text_input("🔍 Filtrar por Atributo (ex: ML, P, Branco)", "")
         df_giro_view = d_giro.copy()
-        
         if filtro_texto:
             df_giro_view = df_giro_view[df_giro_view['SKU Real'].str.contains(filtro_texto, case=False, na=False)]
             st.info(f"Mostrando {len(df_giro_view)} produtos contendo '{filtro_texto}'")
-            
         st.dataframe(df_giro_view)
         st.download_button("📥 Baixar Giro de Produtos", data=to_excel(df_giro_view), file_name="giro_produtos.xlsx")
-        
     with tab8:
         st.subheader("🚀 Oportunidades de Expansão (Cross-Assortment)")
         st.info("Esta tabela mostra quantas unidades de cada produto (real) foram vendidas em cada canal. Use para identificar onde você NÃO está vendendo.")
-        
         filtro_oportunidade = st.text_input("🔍 Filtrar Oportunidades (ex: Body)", "")
         df_op_view = d_oportunidades.copy()
-        
         if filtro_oportunidade:
             df_op_view = df_op_view[df_op_view['SKU Real'].str.contains(filtro_oportunidade, case=False, na=False)]
-            
         st.dataframe(df_op_view)
         st.download_button("📥 Baixar Oportunidades", data=to_excel(df_op_view), file_name="oportunidades_expansao.xlsx")
+    
+    with tab9:
+        st.subheader("🏭 Fábrica & Controle de Estoque")
+        st.markdown("""
+        <div style='background-color: #f0f2f6; padding: 15px; border-radius: 5px; border-left: 5px solid #ff4b4b;'>
+            <b>MÓDULO DE INTEGRAÇÃO EXTERNA</b><br>
+            Esta aba conecta com sua planilha de estoque separada. As ações aqui <b>não afetam</b> os dados financeiros do BI.
+        </div>
+        """, unsafe_allow_html=True)
+        
+        col_ctrl1, col_ctrl2 = st.columns(2)
+        with col_ctrl1:
+            if st.button("🔄 Carregar Estoque Externo"):
+                carregar_estoque_externo.clear()
+                st.success("Estoque recarregado!")
+        with col_ctrl2:
+            if st.button("🗑️ Limpar Fila de Baixa (Começar do Zero)"):
+                st.session_state['fila_baixa_estoque'] = pd.DataFrame()
+                st.success("Fila de baixa limpa! Pode começar a subir novos arquivos.")
+                time.sleep(1)
+                st.rerun()
+            
+        df_estoque_ext = carregar_estoque_externo()
+        
+        if df_estoque_ext.empty:
+            st.error("Não foi possível carregar o estoque externo. Verifique a conexão.")
+        else:
+            st.success(f"Conectado ao Estoque Externo: {len(df_estoque_ext)} produtos carregados.")
+            
+            # Verifica se tem vendas acumuladas na fila
+            df_vendas_fila = st.session_state.get('fila_baixa_estoque', pd.DataFrame())
+            
+            if df_vendas_fila.empty:
+                st.info("ℹ️ A fila de baixa está vazia. Faça upload das vendas na barra lateral para adicionar itens aqui.")
+            else:
+                st.subheader(f"Análise de Baixa (Fila Acumulada: {len(df_vendas_fila)} registros)")
+                df_baixa = expandir_kits_estoque_acumulado(df_vendas_fila, df_estoque_ext)
+                
+                if df_baixa.empty:
+                    st.warning("Nenhum produto das vendas foi encontrado no estoque externo.")
+                else:
+                    # Formatação para exibição
+                    df_view = df_baixa[['codigo_canonical', 'nome', 'estoque_atual', 'quantidade', 'estoque_final', 'origem']].copy()
+                    df_view.columns = ['Código', 'Produto', 'Estoque Atual', 'Qtd a Baixar', 'Estoque Final', 'Origem da Demanda']
+                    
+                    # Alerta de estoque negativo
+                    negativos = df_view[df_view['Estoque Final'] < 0]
+                    if not negativos.empty:
+                        st.error(f"🚨 ATENÇÃO: {len(negativos)} produtos ficarão com estoque NEGATIVO!")
+                        st.dataframe(negativos)
+                    
+                    st.dataframe(df_view)
+                    
+                    col_btn1, col_btn2 = st.columns(2)
+                    with col_btn1:
+                        if st.button("✅ CONFIRMAR BAIXA NO ESTOQUE", type="primary"):
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            sucessos = 0
+                            erros = 0
+                            
+                            total_items = len(df_baixa)
+                            for idx, row in df_baixa.iterrows():
+                                status_text.text(f"Baixando {row['codigo_canonical']}...")
+                                res = movimentar_estoque_webhook(
+                                    row['codigo_canonical'], 
+                                    row['quantidade'], 
+                                    'saida', 
+                                    'SalesBI_Auto'
+                                )
+                                if res.get('success'): sucessos += 1
+                                else: erros += 1
+                                progress_bar.progress((idx + 1) / total_items)
+                                
+                            status_text.empty()
+                            progress_bar.empty()
+                            
+                            if erros == 0:
+                                st.success(f"Sucesso! {sucessos} itens baixados no estoque externo.")
+                                carregar_estoque_externo.clear() # Limpa cache para recarregar saldo novo
+                                st.session_state['fila_baixa_estoque'] = pd.DataFrame() # Limpa fila após sucesso
+                                time.sleep(2)
+                                st.rerun()
+                            else:
+                                st.warning(f"Processo finalizado com {sucessos} sucessos e {erros} erros.")
+                    
+                    with col_btn2:
+                        if st.button("📄 Gerar Ordem de Produção (PDF/Print)"):
+                            st.info("Funcionalidade de PDF em desenvolvimento. Use o print da tabela acima por enquanto.")
 
 else:
     st.info("Aguardando dados...")
