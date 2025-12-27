@@ -13,20 +13,21 @@ from io import StringIO
 import xlsxwriter
 
 # ==============================================================================
-# VERSÃO V37 - GERAÇÃO DE EXCEL PARA CADASTRO DE PRODUTOS FALTANTES
+# VERSÃO V42 - INTEGRAÇÃO FINAL COM PLANILHA BCG
 # ==============================================================================
-# 1. Identifica produtos nas vendas que não existem no estoque
-# 2. Gera botão para baixar Excel formatado para 'template_estoque'
-# 3. Mantém todas as correções anteriores (V36)
+# 1. Mantém TODAS as funcionalidades da V37 (MRP, Webhook, Novos Produtos)
+# 2. Adiciona leitura histórica da planilha 'Config_BI_Final_MatrizBCG'
 # ==============================================================================
 
 st.set_page_config(page_title="Sales BI Pro + MRP Fábrica", page_icon="🏭", layout="wide")
 
 # ==============================================================================
-# CONFIGURAÇÕES DO MÓDULO DE ESTOQUE
+# CONFIGURAÇÕES DO MÓDULO DE ESTOQUE E BCG
 # ==============================================================================
 ESTOQUE_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1PpiMQingHf4llA03BiPIuPJPIZqul4grRU_emWDEK1o/export?format=csv"
 ESTOQUE_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbxTX9uUWnByw6sk6MtuJ5FbjV7zeBKYEoUPPlUlUDS738QqocfCd_NAlh9Eh25XhQywTw/exec"
+# URL de exportação CSV da aba '6. Detalhes' da planilha BCG para leitura histórica
+BCG_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1qoUk6AsNXLpHyzRrZplM4F5573zN9hUwQTNVUF3UC8E/export?format=csv&gid=961459380"
 
 # ==============================================================================
 # CONSTANTES E MAPEAMENTOS
@@ -384,6 +385,27 @@ def gerar_excel_novos_produtos(produtos_faltantes):
     return output.getvalue()
 
 # ==============================================================================
+# FUNÇÃO DE CARREGAMENTO DE DADOS HISTÓRICOS (BCG)
+# ==============================================================================
+@st.cache_data(ttl=300)
+def carregar_dados_historicos():
+    try:
+        r = requests.get(BCG_SHEETS_URL, timeout=15)
+        r.raise_for_status()
+        df = pd.read_csv(StringIO(r.text))
+        
+        # Limpeza básica para garantir compatibilidade
+        if 'Total Venda' in df.columns:
+            df['Total Venda'] = df['Total Venda'].apply(clean_currency)
+        if 'Quantidade' in df.columns:
+            df['Quantidade'] = pd.to_numeric(df['Quantidade'], errors='coerce').fillna(0).astype(int)
+            
+        return df
+    except Exception as e:
+        st.error(f"Erro ao carregar dados históricos da BCG: {e}")
+        return pd.DataFrame()
+
+# ==============================================================================
 # INTERFACE PRINCIPAL
 # ==============================================================================
 st.sidebar.title("🔧 Status da Conexão")
@@ -500,21 +522,36 @@ tabs = st.tabs([
     "💲 Preços", "📝 Detalhes", "🔄 Giro de Produtos", "🚀 Oportunidades", "🏭 MRP Fábrica"
 ])
 
-# Se houver dados processados na memória (Simulação)
+# Carregar dados históricos se não houver upload
+if 'processed_data' not in st.session_state:
+    df_historico = carregar_dados_historicos()
+    if not df_historico.empty:
+        st.session_state.processed_data = df_historico
+        st.toast("Dados históricos carregados da planilha BCG!", icon="📅")
+
+# Se houver dados processados na memória (Simulação ou Histórico)
 if 'processed_data' in st.session_state:
     df_vendas = st.session_state.processed_data
     
     # Cálculos básicos para o Dashboard
-    total_vendas = (df_vendas['Quantidade'] * 50).sum() # Simulação de valor
+    if 'Total Venda' in df_vendas.columns:
+        total_vendas = df_vendas['Total Venda'].sum()
+    else:
+        total_vendas = (df_vendas['Quantidade'] * 50).sum() # Fallback se não tiver coluna de valor
+        
     ticket_medio = total_vendas / len(df_vendas) if len(df_vendas) > 0 else 0
     
     with tabs[0]: # Visão Geral
         c1, c2, c3 = st.columns(3)
         c1.metric("Vendas Totais", format_currency_br(total_vendas))
-        c2.metric("Margem Média", "41,93%")
+        c2.metric("Margem Média", "41,93%") # Placeholder ou calcular se tiver dados
         c3.metric("Ticket Médio", format_currency_br(ticket_medio))
         
-        st.bar_chart(df_vendas.groupby('Canal')['Quantidade'].sum())
+        if 'Canal' in df_vendas.columns:
+            st.bar_chart(df_vendas.groupby('Canal')['Quantidade'].sum())
+
+    with tabs[5]: # Detalhes
+        st.dataframe(df_vendas, use_container_width=True)
 
     with tabs[8]: # MRP Fábrica
         st.header("🏭 Planejamento de Fábrica (MRP)")
