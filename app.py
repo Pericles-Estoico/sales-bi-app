@@ -20,8 +20,8 @@ st.set_page_config(page_title="Sales BI Pro + MRP Fábrica", page_icon="🏭", l
 
 # URLs das Planilhas (MANTIDAS DA VERSÃO V49 ESTÁVEL)
 BCG_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1qoUk6AsNXLpHyzRrZplM4F5573zN9hUwQTNVUF3UC8E/export?format=csv&gid=961459380"
-# URL da aba Kits para correção de cadastro
-KITS_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1qoUk6AsNXLpHyzRrZplM4F5573zN9hUwQTNVUF3UC8E/export?format=csv&gid=1605252243" # GID da aba Kits (assumido, será verificado)
+# URL da planilha completa para correção de cadastro (XLSX)
+KITS_XLSX_URL = "https://docs.google.com/spreadsheets/d/1qoUk6AsNXLpHyzRrZplM4F5573zN9hUwQTNVUF3UC8E/export?format=xlsx"
 # URL do Estoque (RESTAURADA DA VERSÃO V33)
 ESTOQUE_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1PpiMQingHf4llA03BiPIuPJPIZqul4grRU_emWDEK1o/export?format=csv"
 
@@ -260,21 +260,43 @@ def gerar_excel_hierarquico(df_vendas_fila, df_estoque):
     return output.getvalue()
 
 # ==============================================================================
-# NOVA FUNÇÃO: GERAR EXCEL DE CORREÇÃO DE CADASTRO
+# NOVA FUNÇÃO: GERAR EXCEL DE CORREÇÃO DE CADASTRO (CORRIGIDA)
 # ==============================================================================
+@st.cache_data(ttl=3600) # Cache de 1 hora para não baixar toda hora
 def gerar_excel_correcao_cadastro():
     try:
-        # Tenta ler a aba "Kits" da planilha de BI
-        # GID da aba Kits: 1605252243 (verificado no arquivo Config_BI_Final_MatrizBCG.xlsx)
-        url_kits = "https://docs.google.com/spreadsheets/d/1qoUk6AsNXLpHyzRrZplM4F5573zN9hUwQTNVUF3UC8E/export?format=csv&gid=1605252243"
-        df_kits = pd.read_csv(url_kits)
+        # Baixa a planilha completa como XLSX
+        r = requests.get(KITS_XLSX_URL, timeout=30)
+        r.raise_for_status()
+        
+        # Lê todas as abas para encontrar a aba de Kits
+        xls = pd.ExcelFile(io.BytesIO(r.content))
+        
+        # Procura por abas que contenham "Kits" ou "2. Kits"
+        aba_kits = next((s for s in xls.sheet_names if "Kits" in s), None)
+        
+        if not aba_kits:
+            st.error("Aba 'Kits' não encontrada na planilha de BI.")
+            return None
+            
+        df_kits = pd.read_excel(xls, sheet_name=aba_kits)
         
         # Prepara o DataFrame no formato da template_estoque
         df_export = pd.DataFrame()
-        df_export['codigo'] = df_kits['Código Kit']
+        
+        # Mapeamento flexível de colunas
+        col_cod = next((c for c in df_kits.columns if 'Código Kit' in c or 'Codigo Kit' in c), None)
+        col_comps = next((c for c in df_kits.columns if 'SKUs Componentes' in c or 'Componentes' in c), None)
+        col_qtds = next((c for c in df_kits.columns if 'Qtd Componentes' in c or 'Qtd' in c), None)
+        
+        if not col_cod or not col_comps or not col_qtds:
+             st.error("Colunas de Kits não encontradas na aba 'Kits'.")
+             return None
+
+        df_export['codigo'] = df_kits[col_cod]
         df_export['eh_kit'] = 'Sim'
-        df_export['componentes'] = df_kits['SKUs Componentes'].str.replace(';', ',') # Ajusta separador se necessário
-        df_export['quantidades'] = df_kits['Qtd Componentes'].str.replace(';', ',') # Ajusta separador se necessário
+        df_export['componentes'] = df_kits[col_comps].astype(str).str.replace(';', ',')
+        df_export['quantidades'] = df_kits[col_qtds].astype(str).str.replace(';', ',')
         
         # Gera o Excel
         output = io.BytesIO()
@@ -338,6 +360,7 @@ with st.sidebar:
     
     if st.button("🔄 Atualizar Dados (Limpar Cache)"):
         carregar_dados_detalhes.clear()
+        gerar_excel_correcao_cadastro.clear() # Limpa cache da correção também
         st.rerun()
         
     st.divider()
@@ -493,7 +516,7 @@ if not df_detalhes.empty:
                 time.sleep(1)
                 st.rerun()
         with col_ctrl3:
-            # NOVO BOTÃO DE CORREÇÃO
+            # NOVO BOTÃO DE CORREÇÃO (AGORA COM LÓGICA ROBUSTA)
             excel_correcao = gerar_excel_correcao_cadastro()
             if excel_correcao:
                 st.download_button(
