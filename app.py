@@ -13,12 +13,11 @@ from io import StringIO
 import xlsxwriter
 
 # ==============================================================================
-# VERSÃO V35 - EXCEL MRP DETALHADO (ORDEM DE PRODUÇÃO REAL)
+# VERSÃO V36 - CORREÇÃO DE PARSING DE LISTAS E RECURSÃO INFINITA
 # ==============================================================================
-# 1. Cruzamento com Estoque na linha do Semi (Pai)
-# 2. Cruzamento com Estoque na linha do Produto (Filho)
-# 3. Coluna de Insumos Necessários
-# 4. Aba de Resumo de Compras/Insumos
+# 1. Correção do parsing de 'quantidades' (1,1 lido como texto "1,1" e não float 1.1)
+# 2. Proteção contra recursão infinita (Kit contendo a si mesmo)
+# 3. Suporte a separadores ',' e ';'
 # ==============================================================================
 
 st.set_page_config(page_title="Sales BI Pro + MRP Fábrica", page_icon="🏭", layout="wide")
@@ -112,13 +111,32 @@ def safe_int(x, default=0):
         return int(float(str(x).replace(",", ".")))
     except: return default
 
-def parse_int_list(value):
+def parse_list_str(value):
+    """
+    Faz o parsing robusto de listas separadas por vírgula ou ponto e vírgula.
+    Trata o caso onde '1,1' é lido como float 1.1 pelo pandas, convertendo para ['1', '1'].
+    """
     if value is None: return []
-    if isinstance(value, float) and math.isnan(value): return []
-    parts = [p.strip() for p in str(value).split(",")]
+    if isinstance(value, float):
+        if math.isnan(value): return []
+        # Se for float (ex: 1.1), converte para string "1.1" e substitui ponto por vírgula para separar
+        s_val = str(value).replace('.', ',')
+    else:
+        s_val = str(value)
+    
+    # Normaliza separadores: troca ';' por ','
+    s_val = s_val.replace(';', ',')
+    
+    parts = [p.strip() for p in s_val.split(",")]
+    return [p for p in parts if p]
+
+def parse_int_list(value):
+    """
+    Usa parse_list_str para obter a lista de strings e converte para inteiros.
+    """
+    parts = parse_list_str(value)
     out = []
     for p in parts:
-        if not p: continue
         v = safe_int(p, None)
         if v is not None: out.append(v)
     return out
@@ -131,32 +149,47 @@ def carregar_estoque_externo():
     try:
         r = requests.get(ESTOQUE_SHEETS_URL, timeout=15)
         r.raise_for_status()
-        df = pd.read_csv(StringIO(r.text))
+        # Lê tudo como string (dtype=str) para evitar que o pandas converta "1,1" em 1.1
+        df = pd.read_csv(StringIO(r.text), dtype=str)
         
         req = ['codigo', 'nome', 'categoria', 'estoque_atual', 'estoque_min', 'estoque_max']
         for c in req:
-            if c not in df.columns: df[c] = 0
+            if c not in df.columns: df[c] = '0'
             
-        df['estoque_atual'] = pd.to_numeric(df['estoque_atual'], errors='coerce').fillna(0)
+        df['estoque_atual'] = pd.to_numeric(df['estoque_atual'].str.replace(',', '.'), errors='coerce').fillna(0).astype(int)
         
         for c in ['componentes', 'quantidades', 'eh_kit']:
             if c not in df.columns: df[c] = ''
-            else: df[c] = df[c].astype(str).fillna('')
+            else: df[c] = df[c].fillna('')
             
-        df['codigo_key'] = df['codigo'].astype(str).map(normalize_key)
+        df['codigo_key'] = df['codigo'].map(normalize_key)
         return df
     except Exception as e:
         st.error(f"Erro ao carregar estoque externo: {e}")
         return pd.DataFrame()
 
-def calcular_mrp_recursivo(codigo_key, qtd_necessaria, df_estoque, nivel=0, caminho=""):
+def calcular_mrp_recursivo(codigo_key, qtd_necessaria, df_estoque, nivel=0, caminho="", visitados=None):
+    if visitados is None: visitados = set()
+    
     acoes = []
+    
+    # Proteção contra recursão infinita (Ciclo)
+    if codigo_key in visitados:
+        acoes.append({
+            'nivel': nivel, 'codigo': codigo_key, 'nome': f"CICLO DETECTADO ({codigo_key})",
+            'acao': 'ERRO_RECEITA', 'qtd': qtd_necessaria, 'estoque_atual': 0, 'caminho': caminho
+        })
+        return acoes
+    
+    visitados.add(codigo_key)
+    
     produto = df_estoque[df_estoque['codigo_key'] == codigo_key]
     if produto.empty:
         acoes.append({
             'nivel': nivel, 'codigo': codigo_key, 'nome': f"PRODUTO NÃO ENCONTRADO ({codigo_key})",
             'acao': 'ERRO_CADASTRO', 'qtd': qtd_necessaria, 'estoque_atual': 0, 'caminho': caminho
         })
+        visitados.remove(codigo_key)
         return acoes
 
     row = produto.iloc[0]
@@ -175,7 +208,7 @@ def calcular_mrp_recursivo(codigo_key, qtd_necessaria, df_estoque, nivel=0, cami
         
     if qtd_faltante > 0:
         if eh_kit:
-            comps = [normalize_key(c.strip()) for c in str(row.get('componentes', '')).split(',') if c.strip()]
+            comps = [normalize_key(c) for c in parse_list_str(row.get('componentes', ''))]
             quants = parse_int_list(row.get('quantidades', ''))
             
             if comps and quants and len(comps) == len(quants):
@@ -186,7 +219,9 @@ def calcular_mrp_recursivo(codigo_key, qtd_necessaria, df_estoque, nivel=0, cami
                 for comp_key, comp_qtd_unit in zip(comps, quants):
                     qtd_comp_total = qtd_faltante * comp_qtd_unit
                     novo_caminho = f"{caminho} > {nome}" if caminho else nome
-                    acoes_filho = calcular_mrp_recursivo(comp_key, qtd_comp_total, df_estoque, nivel + 1, novo_caminho)
+                    # Passa uma cópia de visitados para o próximo nível, ou remove após retorno?
+                    # Melhor passar o set atualizado para a recursão
+                    acoes_filho = calcular_mrp_recursivo(comp_key, qtd_comp_total, df_estoque, nivel + 1, novo_caminho, visitados.copy())
                     acoes.extend(acoes_filho)
             else:
                 acoes.append({
@@ -198,6 +233,8 @@ def calcular_mrp_recursivo(codigo_key, qtd_necessaria, df_estoque, nivel=0, cami
                 'nivel': nivel, 'codigo': row['codigo'], 'nome': nome,
                 'acao': 'COMPRAR_PRODUZIR_EXTERNO', 'qtd': qtd_faltante, 'estoque_atual': estoque_atual, 'caminho': caminho
             })
+            
+    visitados.remove(codigo_key)
     return acoes
 
 def processar_mrp_fila(df_vendas_fila, df_estoque):
@@ -237,7 +274,7 @@ def gerar_excel_hierarquico(df_vendas_fila, df_estoque):
     
     for _, row in df_estoque.iterrows():
         if str(row.get('eh_kit', '')).lower() == 'sim':
-            comps_cods = [normalize_key(c.strip()) for c in str(row.get('componentes', '')).split(',') if c.strip()]
+            comps_cods = [normalize_key(c) for c in parse_list_str(row.get('componentes', ''))]
             quants = parse_int_list(row.get('quantidades', ''))
             
             # Mapear Insumos (Componentes além do Semi)
