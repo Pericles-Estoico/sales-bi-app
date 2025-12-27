@@ -11,14 +11,13 @@ import requests
 import math
 from io import StringIO
 import xlsxwriter
-import plotly.express as px
 
 # ==============================================================================
-# VERSÃO V44 - COMPLETA (TODAS AS ABAS) + FOCO NA BCG
+# VERSÃO V45 - SEM PLOTLY (TODAS AS ABAS)
 # ==============================================================================
-# 1. Restaura todas as abas (CNPJ, BCG, Preços, Giro, Oportunidades)
-# 2. Mantém a remoção da dependência de estoque/MRP
-# 3. Carrega dados históricos automaticamente
+# 1. Remove dependência do Plotly para evitar erros de instalação
+# 2. Usa gráficos nativos do Streamlit (st.scatter_chart)
+# 3. Mantém todas as funcionalidades e abas
 # ==============================================================================
 
 st.set_page_config(page_title="Sales BI Pro", page_icon="📊", layout="wide")
@@ -278,9 +277,14 @@ if 'processed_data' in st.session_state:
             
             df_bcg['Classificação'] = df_bcg.apply(classificar_bcg, axis=1)
             
-            fig = px.scatter(df_bcg, x='Margem (%)', y='Quantidade', color='Classificação', 
-                             size='Total Venda', hover_name='Produto', title="Matriz BCG (Volume x Margem)")
-            st.plotly_chart(fig, use_container_width=True)
+            # Substituição do Plotly por st.scatter_chart (Nativo)
+            st.scatter_chart(
+                df_bcg,
+                x='Margem (%)',
+                y='Quantidade',
+                color='Classificação',
+                size='Total Venda'
+            )
             
             st.dataframe(df_bcg, use_container_width=True)
         else:
@@ -291,9 +295,36 @@ if 'processed_data' in st.session_state:
         if 'Canal' in df_vendas.columns:
             canal_sel = st.selectbox("Selecione o Canal", df_vendas['Canal'].unique())
             df_canal = df_vendas[df_vendas['Canal'] == canal_sel]
-            # Reutiliza lógica BCG
-            # ... (Lógica similar à aba anterior filtrada por canal)
-            st.write(f"Análise para {canal_sel} (Em desenvolvimento)")
+            
+            if not df_canal.empty:
+                # Reutiliza lógica BCG para o canal
+                df_bcg_canal = df_canal.groupby('Produto').agg({
+                    'Quantidade': 'sum',
+                    'Margem (%)': 'mean',
+                    'Total Venda': 'sum'
+                }).reset_index()
+                
+                med_qtd_c = df_bcg_canal['Quantidade'].median()
+                med_margem_c = df_bcg_canal['Margem (%)'].median()
+                
+                def classificar_bcg_canal(row):
+                    if row['Quantidade'] >= med_qtd_c and row['Margem (%)'] >= med_margem_c: return 'Estrela ⭐'
+                    if row['Quantidade'] >= med_qtd_c and row['Margem (%)'] < med_margem_c: return 'Vaca Leiteira 🐄'
+                    if row['Quantidade'] < med_qtd_c and row['Margem (%)'] >= med_margem_c: return 'Interrogação ❓'
+                    return 'Abacaxi 🍍'
+                
+                df_bcg_canal['Classificação'] = df_bcg_canal.apply(classificar_bcg_canal, axis=1)
+                
+                st.scatter_chart(
+                    df_bcg_canal,
+                    x='Margem (%)',
+                    y='Quantidade',
+                    color='Classificação',
+                    size='Total Venda'
+                )
+                st.dataframe(df_bcg_canal, use_container_width=True)
+            else:
+                st.warning("Sem dados para este canal.")
         else:
             st.info("Coluna 'Canal' não encontrada.")
 
@@ -321,7 +352,11 @@ if 'processed_data' in st.session_state:
         st.subheader("🚀 Oportunidades de Melhoria")
         st.write("Produtos com alta margem e baixo volume (Interrogação) que podem ser promovidos:")
         # Lógica de filtro para Interrogação
-        # ...
+        if 'Classificação' in df_bcg.columns:
+            oportunidades = df_bcg[df_bcg['Classificação'] == 'Interrogação ❓'].sort_values('Margem (%)', ascending=False)
+            st.dataframe(oportunidades, use_container_width=True)
+        else:
+            st.info("Classificação BCG não disponível.")
 
 else:
     with tabs[0]:
