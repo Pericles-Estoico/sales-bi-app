@@ -13,11 +13,12 @@ from io import StringIO
 import xlsxwriter
 
 # ==============================================================================
-# VERSÃO V33 - SUPER APP COM MODO SIMULAÇÃO E EXCEL HIERÁRQUICO
+# VERSÃO V35 - EXCEL MRP DETALHADO (ORDEM DE PRODUÇÃO REAL)
 # ==============================================================================
-# 1. MODO SIMULAÇÃO GLOBAL: Bloqueia qualquer escrita no Google Sheets/Webhook
-# 2. EXCEL HIERÁRQUICO: Agrupa por Semi (Pai) -> Acabamentos (Filhos)
-# 3. ABAS POR MARKETPLACE: Gera uma aba para cada canal no Excel de Produção
+# 1. Cruzamento com Estoque na linha do Semi (Pai)
+# 2. Cruzamento com Estoque na linha do Produto (Filho)
+# 3. Coluna de Insumos Necessários
+# 4. Aba de Resumo de Compras/Insumos
 # ==============================================================================
 
 st.set_page_config(page_title="Sales BI Pro + MRP Fábrica", page_icon="🏭", layout="wide")
@@ -210,99 +211,185 @@ def processar_mrp_fila(df_vendas_fila, df_estoque):
     return pd.DataFrame(plano_mrp)
 
 # ==============================================================================
-# GERAÇÃO DE EXCEL HIERÁRQUICO (ÁRVORE DE SEMIS)
+# GERAÇÃO DE EXCEL HIERÁRQUICO (ÁRVORE DE SEMIS) COM MRP DETALHADO
 # ==============================================================================
 def gerar_excel_hierarquico(df_vendas_fila, df_estoque):
     """
     Gera um Excel com abas por Marketplace.
     Em cada aba, agrupa os produtos pelo seu 'Semi' (Pai).
+    Mostra estoque atual e necessidade líquida (O que falta produzir/comprar).
     """
     output = io.BytesIO()
     workbook = xlsxwriter.Workbook(output, {'in_memory': True})
     
     # Formatos
-    fmt_header = workbook.add_format({'bold': True, 'bg_color': '#D9EAD3', 'border': 1})
+    fmt_header = workbook.add_format({'bold': True, 'bg_color': '#D9EAD3', 'border': 1, 'align': 'center'})
     fmt_pai = workbook.add_format({'bold': True, 'bg_color': '#EFEFEF', 'border': 1})
+    fmt_pai_alerta = workbook.add_format({'bold': True, 'bg_color': '#F4CCCC', 'border': 1, 'font_color': '#990000'})
     fmt_filho = workbook.add_format({'indent': 2, 'border': 1})
+    fmt_filho_alerta = workbook.add_format({'indent': 2, 'border': 1, 'bg_color': '#FFF2CC', 'font_color': '#B45F06'})
     fmt_check = workbook.add_format({'border': 1})
+    fmt_num = workbook.add_format({'border': 1, 'align': 'center'})
     
-    # 1. Identificar o "Semi" de cada produto vendido
-    # Procura nos componentes do Kit se existe algum com nome "Semi" ou "Base"
+    # 1. Identificar o "Semi" de cada produto vendido e mapear componentes
     mapa_produto_semi = {}
+    mapa_produto_insumos = {} # { 'prod_key': [ {'nome': 'Gola', 'qtd': 1}, ... ] }
     
     for _, row in df_estoque.iterrows():
         if str(row.get('eh_kit', '')).lower() == 'sim':
-            comps_nomes = [] # Precisaria dos nomes dos componentes, mas aqui só tenho códigos no CSV de estoque
-            # Como o CSV de estoque tem 'componentes' (códigos), vou tentar achar o nome do componente
-            # Isso exigiria um lookup reverso. Simplificação:
-            # Vou assumir que o "Semi" é o PRIMEIRO componente da lista do Kit
             comps_cods = [normalize_key(c.strip()) for c in str(row.get('componentes', '')).split(',') if c.strip()]
+            quants = parse_int_list(row.get('quantidades', ''))
+            
+            # Mapear Insumos (Componentes além do Semi)
+            insumos_desc = []
+            semi_cod = None
+            
             if comps_cods:
                 semi_cod = comps_cods[0] # Assumindo que o Semi é o primeiro
-                # Busca o nome desse Semi
+                
+                # Busca o nome do Semi
                 semi_row = df_estoque[df_estoque['codigo_key'] == semi_cod]
                 if not semi_row.empty:
-                    mapa_produto_semi[row['codigo_key']] = semi_row.iloc[0]['nome']
+                    mapa_produto_semi[row['codigo_key']] = {'nome': semi_row.iloc[0]['nome'], 'key': semi_cod}
                 else:
-                    mapa_produto_semi[row['codigo_key']] = f"Base ({semi_cod})"
-    
+                    mapa_produto_semi[row['codigo_key']] = {'nome': f"Base ({semi_cod})", 'key': semi_cod}
+                
+                # Outros componentes são insumos (Golas, Bordados, etc)
+                if len(comps_cods) > 1 and len(quants) == len(comps_cods):
+                    for i in range(1, len(comps_cods)):
+                        ins_cod = comps_cods[i]
+                        ins_qtd = quants[i]
+                        ins_row = df_estoque[df_estoque['codigo_key'] == ins_cod]
+                        ins_nome = ins_row.iloc[0]['nome'] if not ins_row.empty else ins_cod
+                        insumos_desc.append(f"{ins_qtd}x {ins_nome}")
+            
+            mapa_produto_insumos[row['codigo_key']] = ", ".join(insumos_desc)
+
     # 2. Agrupar vendas por Canal
     canais = df_vendas_fila['Canal'].unique()
+    resumo_insumos_geral = {} # { 'Nome Insumo': qtd_total }
     
     for canal in canais:
-        # Limpa nome da aba (max 31 chars)
-        nome_aba = str(canal).replace('📊 ', '').replace('🛒 ', '').replace('🛍️ ', '').replace('🏪 ', '').replace('👗 ', '')[:30]
+        # Limpa nome da aba
+        nome_aba = str(canal).replace('📊 ', '').replace('🛒 ', '').replace('🛍️ ', '').replace('🏪 ', '').replace('👗 ', '')
+        for char in [':', '\\', '/', '?', '*', '[', ']']: nome_aba = nome_aba.replace(char, '-')
+        nome_aba = nome_aba[:30]
         worksheet = workbook.add_worksheet(nome_aba)
         
         # Cabeçalhos
-        worksheet.write(0, 0, "Item / Produto", fmt_header)
-        worksheet.write(0, 1, "Quantidade", fmt_header)
-        worksheet.write(0, 2, "Check", fmt_header)
-        worksheet.set_column(0, 0, 60)
-        worksheet.set_column(1, 1, 15)
-        worksheet.set_column(2, 2, 10)
+        headers = ["Item / Produto", "Venda", "Estoque", "A Produzir", "Insumos Necessários", "Check"]
+        for col, h in enumerate(headers): worksheet.write(0, col, h, fmt_header)
         
-        # Filtra vendas do canal
+        worksheet.set_column(0, 0, 50) # Item
+        worksheet.set_column(1, 3, 10) # Números
+        worksheet.set_column(4, 4, 40) # Insumos
+        worksheet.set_column(5, 5, 8)  # Check
+        
         vendas_canal = df_vendas_fila[df_vendas_fila['Canal'] == canal]
         
         # Agrupa por Semi
-        arvore = {} # { 'Nome do Semi': [ {'produto': 'Body X', 'qtd': 10}, ... ] }
+        arvore = {} 
         
         for _, row in vendas_canal.iterrows():
             prod_cod = str(row['Produto'])
             prod_key = normalize_key(prod_cod)
             qtd = row['Quantidade']
             
-            # Tenta achar o nome do produto no estoque
             prod_nome = prod_cod
             prod_row = df_estoque[df_estoque['codigo_key'] == prod_key]
-            if not prod_row.empty: prod_nome = prod_row.iloc[0]['nome']
+            prod_estoque = 0
+            if not prod_row.empty: 
+                prod_nome = prod_row.iloc[0]['nome']
+                prod_estoque = safe_int(prod_row.iloc[0]['estoque_atual'])
             
-            semi_nome = mapa_produto_semi.get(prod_key, "Outros / Sem Base Definida")
+            semi_info = mapa_produto_semi.get(prod_key, {'nome': "Outros / Sem Base Definida", 'key': None})
+            semi_nome = semi_info['nome']
+            semi_key = semi_info['key']
             
-            if semi_nome not in arvore: arvore[semi_nome] = []
-            arvore[semi_nome].append({'produto': prod_nome, 'qtd': qtd})
+            if semi_nome not in arvore: arvore[semi_nome] = {'key': semi_key, 'itens': []}
             
+            insumos_txt = mapa_produto_insumos.get(prod_key, "")
+            
+            arvore[semi_nome]['itens'].append({
+                'produto': prod_nome, 
+                'qtd_venda': qtd,
+                'estoque': prod_estoque,
+                'insumos': insumos_txt,
+                'key': prod_key
+            })
+
         # Escreve na aba
         row_idx = 1
-        for semi, itens in arvore.items():
-            total_semi = sum(item['qtd'] for item in itens)
+        for semi_nome, dados_semi in arvore.items():
+            itens = dados_semi['itens']
+            semi_key = dados_semi['key']
             
-            # Linha do Pai (Semi)
-            worksheet.write(row_idx, 0, f"{semi}", fmt_pai)
-            worksheet.write(row_idx, 1, total_semi, fmt_pai)
-            worksheet.write(row_idx, 2, "", fmt_pai)
+            # Calcula totais do Semi
+            total_venda_semi = sum(item['qtd_venda'] for item in itens)
+            
+            # Busca estoque do Semi
+            estoque_semi = 0
+            if semi_key:
+                s_row = df_estoque[df_estoque['codigo_key'] == semi_key]
+                if not s_row.empty: estoque_semi = safe_int(s_row.iloc[0]['estoque_atual'])
+            
+            falta_semi = max(0, total_venda_semi - estoque_semi)
+            
+            # Formatação condicional para o Semi
+            fmt_s = fmt_pai_alerta if falta_semi > 0 else fmt_pai
+            msg_semi = f"CORTAR: {falta_semi}" if falta_semi > 0 else "OK"
+            
+            worksheet.write(row_idx, 0, f"{semi_nome}", fmt_s)
+            worksheet.write(row_idx, 1, total_venda_semi, fmt_s)
+            worksheet.write(row_idx, 2, estoque_semi, fmt_s)
+            worksheet.write(row_idx, 3, msg_semi, fmt_s)
+            worksheet.write(row_idx, 4, "", fmt_s)
+            worksheet.write(row_idx, 5, "", fmt_s)
             row_idx += 1
             
-            # Linhas dos Filhos (Produtos Finais)
+            # Linhas dos Filhos
             for item in itens:
-                worksheet.write(row_idx, 0, f"  {item['produto']}", fmt_filho)
-                worksheet.write(row_idx, 1, item['qtd'], fmt_filho)
-                worksheet.write(row_idx, 2, "[   ]", fmt_check)
+                qtd_venda = item['qtd_venda']
+                estoque_prod = item['estoque']
+                falta_prod = max(0, qtd_venda - estoque_prod)
+                
+                fmt_p = fmt_filho_alerta if falta_prod > 0 else fmt_filho
+                msg_prod = f"MONTAR: {falta_prod}" if falta_prod > 0 else "OK"
+                
+                # Acumula insumos necessários para o Resumo Geral
+                if falta_prod > 0 and item['insumos']:
+                    partes = item['insumos'].split(', ')
+                    for p in partes:
+                        try:
+                            qtd_ins_str, nome_ins = p.split('x ', 1)
+                            qtd_total_ins = int(qtd_ins_str) * falta_prod
+                            resumo_insumos_geral[nome_ins] = resumo_insumos_geral.get(nome_ins, 0) + qtd_total_ins
+                        except: pass
+
+                worksheet.write(row_idx, 0, f"  {item['produto']}", fmt_p)
+                worksheet.write(row_idx, 1, qtd_venda, fmt_num)
+                worksheet.write(row_idx, 2, estoque_prod, fmt_num)
+                worksheet.write(row_idx, 3, msg_prod, fmt_num)
+                worksheet.write(row_idx, 4, item['insumos'], fmt_p)
+                worksheet.write(row_idx, 5, "[   ]", fmt_check)
                 row_idx += 1
             
-            row_idx += 1 # Espaço entre grupos
+            row_idx += 1
             
+    # 3. Aba de Resumo de Insumos
+    if resumo_insumos_geral:
+        ws_resumo = workbook.add_worksheet("RESUMO DE COMPRAS")
+        ws_resumo.write(0, 0, "Insumo / Acabamento", fmt_header)
+        ws_resumo.write(0, 1, "Qtd Total Necessária", fmt_header)
+        ws_resumo.set_column(0, 0, 40)
+        ws_resumo.set_column(1, 1, 20)
+        
+        r_idx = 1
+        for insumo, qtd in sorted(resumo_insumos_geral.items()):
+            ws_resumo.write(r_idx, 0, insumo, fmt_check)
+            ws_resumo.write(r_idx, 1, qtd, fmt_num)
+            r_idx += 1
+
     workbook.close()
     return output.getvalue()
 
@@ -728,7 +815,7 @@ try:
                     metas_dict[row['Indicador']] = float(row['Valor'])
                 except: pass
 except Exception as e:
-    st.error(f"Erro conexão: {e}")
+    st.error(f"Erro de conexão: {e}")
     st.stop()
 
 st.title("📊 Sales BI Pro + 🏭 MRP Fábrica")
@@ -933,6 +1020,3 @@ if not df_detalhes.empty and 'Total Venda' in df_detalhes.columns:
                         )
                     except Exception as e:
                         st.error(f"Erro ao gerar Excel: {e}")
-
-else:
-    st.info("Aguardando dados...")
