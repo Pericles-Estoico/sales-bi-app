@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
+# import plotly.express as px  <-- REMOVIDO A PEDIDO DO USUÁRIO
 from datetime import datetime
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -447,13 +447,14 @@ if not df_detalhes.empty:
         c2.metric("Margem Média", format_percent_br(margem_media))
         c3.metric("Ticket Médio", format_currency_br(ticket_medio))
         
-        fig_vendas = px.bar(df_detalhes.groupby('Canal')['Total Venda'].sum().reset_index(), x='Canal', y='Total Venda', title="Vendas por Canal")
-        st.plotly_chart(fig_vendas, use_container_width=True)
+        # SUBSTITUIÇÃO PLOTLY -> STREAMLIT NATIVE
+        df_vendas_canal = df_detalhes.groupby('Canal')['Total Venda'].sum().reset_index()
+        st.bar_chart(df_vendas_canal.set_index('Canal'))
 
     with tab2:
         df_cnpj = df_detalhes.groupby('CNPJ')['Total Venda'].sum().reset_index()
-        fig_cnpj = px.pie(df_cnpj, values='Total Venda', names='CNPJ', title="Vendas por CNPJ")
-        st.plotly_chart(fig_cnpj, use_container_width=True)
+        # SUBSTITUIÇÃO PLOTLY -> STREAMLIT NATIVE (PIE CHART NÃO TEM NATIVO, USANDO BAR CHART)
+        st.bar_chart(df_cnpj.set_index('CNPJ'))
         st.dataframe(df_detalhes.groupby(['CNPJ', 'Canal'])['Total Venda'].sum().reset_index())
 
     with tab3:
@@ -462,10 +463,15 @@ if not df_detalhes.empty:
         df_bcg = df_detalhes.groupby('Produto').agg({'Total Venda': 'sum', 'Margem (%)': 'mean', 'Quantidade': 'sum'}).reset_index()
         df_bcg['Classificação'] = df_bcg.apply(lambda x: classificar_bcg(x, med_v, med_m), axis=1)
         
-        fig_bcg = px.scatter(df_bcg, x='Margem (%)', y='Quantidade', size='Total Venda', color='Classificação',
-                             hover_name='Produto', title="Matriz BCG Geral",
-                             color_discrete_map={'Estrela ⭐': 'gold', 'Vaca Leiteira 🐄': 'silver', 'Interrogação ❓': 'blue', 'Abacaxi 🍍': 'red'})
-        st.plotly_chart(fig_bcg, use_container_width=True)
+        # SUBSTITUIÇÃO PLOTLY -> STREAMLIT NATIVE (SCATTER)
+        st.subheader("Matriz BCG Geral")
+        st.scatter_chart(
+            df_bcg,
+            x='Margem (%)',
+            y='Quantidade',
+            size='Total Venda',
+            color='Classificação'
+        )
 
     with tab4:
         canal_bcg = st.selectbox("Selecione o Canal", df_detalhes['Canal'].unique())
@@ -476,10 +482,15 @@ if not df_detalhes.empty:
             df_bcg_c = df_canal.groupby('Produto').agg({'Total Venda': 'sum', 'Margem (%)': 'mean', 'Quantidade': 'sum'}).reset_index()
             df_bcg_c['Classificação'] = df_bcg_c.apply(lambda x: classificar_bcg(x, med_v_c, med_m_c), axis=1)
             
-            fig_bcg_c = px.scatter(df_bcg_c, x='Margem (%)', y='Quantidade', size='Total Venda', color='Classificação',
-                                 hover_name='Produto', title=f"Matriz BCG - {canal_bcg}",
-                                 color_discrete_map={'Estrela ⭐': 'gold', 'Vaca Leiteira 🐄': 'silver', 'Interrogação ❓': 'blue', 'Abacaxi 🍍': 'red'})
-            st.plotly_chart(fig_bcg_c, use_container_width=True)
+            # SUBSTITUIÇÃO PLOTLY -> STREAMLIT NATIVE (SCATTER)
+            st.subheader(f"Matriz BCG - {canal_bcg}")
+            st.scatter_chart(
+                df_bcg_c,
+                x='Margem (%)',
+                y='Quantidade',
+                size='Total Venda',
+                color='Classificação'
+            )
 
     with tab5:
         st.dataframe(df_detalhes.groupby(['Produto', 'Canal'])['Total Venda'].mean().unstack())
