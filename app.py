@@ -13,11 +13,11 @@ from io import StringIO
 import xlsxwriter
 
 # ==============================================================================
-# VERSÃO V45 - SEM PLOTLY (TODAS AS ABAS)
+# VERSÃO V46 - LIMPA (SEM ESTOQUE, APENAS BI)
 # ==============================================================================
-# 1. Remove dependência do Plotly para evitar erros de instalação
-# 2. Usa gráficos nativos do Streamlit (st.scatter_chart)
-# 3. Mantém todas as funcionalidades e abas
+# 1. Remove dependência do template_estoque
+# 2. Carrega dados da Config_BI_Final_MatrizBCG
+# 3. Mantém estrutura original sem gráficos extras
 # ==============================================================================
 
 st.set_page_config(page_title="Sales BI Pro", page_icon="📊", layout="wide")
@@ -25,7 +25,7 @@ st.set_page_config(page_title="Sales BI Pro", page_icon="📊", layout="wide")
 # ==============================================================================
 # CONFIGURAÇÕES
 # ==============================================================================
-ESTOQUE_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbxTX9uUWnByw6sk6MtuJ5FbjV7zeBKYEoUPPlUlUDS738QqocfCd_NAlh9Eh25XhQywTw/exec"
+# URL da planilha Config_BI_Final_MatrizBCG (Aba 6. Detalhes - GID 961459380)
 BCG_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1qoUk6AsNXLpHyzRrZplM4F5573zN9hUwQTNVUF3UC8E/export?format=csv&gid=961459380"
 
 # ==============================================================================
@@ -92,7 +92,7 @@ def normalize_key(s: str) -> str:
     return s.upper().strip()
 
 # ==============================================================================
-# FUNÇÃO DE CARREGAMENTO DE DADOS HISTÓRICOS (BCG)
+# FUNÇÃO DE CARREGAMENTO DE DADOS
 # ==============================================================================
 @st.cache_data(ttl=300)
 def carregar_dados_historicos():
@@ -277,7 +277,7 @@ if 'processed_data' in st.session_state:
             
             df_bcg['Classificação'] = df_bcg.apply(classificar_bcg, axis=1)
             
-            # Substituição do Plotly por st.scatter_chart (Nativo)
+            # Gráfico Nativo Simples
             st.scatter_chart(
                 df_bcg,
                 x='Margem (%)',
