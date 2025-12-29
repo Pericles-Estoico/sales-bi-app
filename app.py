@@ -13,10 +13,6 @@ from io import StringIO
 import xlsxwriter
 import plotly.express as px
 
-# Importar novos módulos de integração
-from modules.inventory_integration import InventoryIntegration
-from modules.rupture_analysis import RuptureAnalysis
-
 # ==============================================================================
 # VERSÃO V56 - INTEGRAÇÃO COM GESTÃO DE ESTOQUE
 # ==============================================================================
@@ -292,8 +288,17 @@ with tabs[7]:
 with tabs[8]:
     st.subheader("📦 Gestão de Estoque")
     
-    # Inicializar integração
-    inv_integration = InventoryIntegration()
+    # Importar módulos (import local para evitar erro se módulos não existirem)
+    try:
+        from modules.inventory_integration import InventoryIntegration
+        from modules.rupture_analysis import RuptureAnalysis
+        
+        # Inicializar integração
+        inv_integration = InventoryIntegration()
+    except ImportError as e:
+        st.error(f"❌ Erro ao importar módulos de gestão de estoque: {e}")
+        st.info("💡 Aguarde alguns minutos para o Streamlit atualizar os arquivos do GitHub.")
+        st.stop()
     
     # Carregar dados de estoque
     with st.spinner("Carregando dados de estoque..."):
