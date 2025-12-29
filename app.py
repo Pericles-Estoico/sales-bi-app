@@ -111,7 +111,7 @@ def normalizar(texto):
 # ==============================================================================
 # INICIALIZAÇÃO DO LEITOR DE SHEETS
 # ==============================================================================
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def get_sheets_reader():
     """Inicializa o leitor de Google Sheets (cached)"""
     return SheetsReader(SPREADSHEET_ID)
@@ -119,7 +119,7 @@ def get_sheets_reader():
 # ==============================================================================
 # FUNÇÃO DE CARREGAMENTO DE DADOS (CACHEADA)
 # ==============================================================================
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, show_spinner=False)
 def carregar_dados(tipo):
     """
     Carrega dados de uma aba do Google Sheets
@@ -138,7 +138,7 @@ def carregar_dados(tipo):
         if df.empty:
             return df
         
-        # Limpeza Genérica
+        # Limpeza Genérica (apenas se necessário)
         for col in df.columns:
             if 'Total' in col or 'Venda' in col or 'Lucro' in col or 'Preço' in col:
                 if df[col].dtype == 'object':
@@ -182,24 +182,17 @@ if 'sandbox_mode' not in st.session_state:
 sandbox_toggle = st.sidebar.checkbox("🧪 MODO SIMULAÇÃO (Sandbox)", value=st.session_state.sandbox_mode, help="Ative para testar sem salvar dados reais.")
 if sandbox_toggle != st.session_state.sandbox_mode:
     st.session_state.sandbox_mode = sandbox_toggle
-    st.rerun()
 
 if st.session_state.sandbox_mode:
     st.sidebar.warning("⚠️ MODO SIMULAÇÃO ATIVO: Nenhuma alteração será salva!")
-
-# Carregamento Inicial
-with st.spinner("Conectando à planilha mestre..."):
-    df_dashboard = carregar_dados('dashboard')
-    if not df_dashboard.empty:
-        st.sidebar.success("Conectado: Config_BI_Final_MatrizBCG")
-    else:
-        st.sidebar.error("Falha na conexão com a planilha.")
 
 st.sidebar.divider()
 st.sidebar.header("📥 Importar Novas Vendas")
 
 if st.sidebar.button("🔄 Atualizar Dados (Limpar Cache)"):
     st.cache_data.clear()
+    st.cache_resource.clear()
+    st.success("✅ Cache limpo! A página será recarregada.")
     st.rerun()
 
 # Inputs de Upload (Mantidos para compatibilidade)
@@ -222,6 +215,9 @@ tabs = st.tabs([
 
 # 1. VISÃO GERAL
 with tabs[0]:
+    with st.spinner("📊 Carregando visão geral..."):
+        df_dashboard = carregar_dados('dashboard')
+    
     if not df_dashboard.empty:
         total_vendas = df_dashboard['Total Venda'].sum()
         margem_media = df_dashboard['Margem (%)'].mean()
@@ -237,11 +233,13 @@ with tabs[0]:
         fig = px.bar(df_dashboard, x='Canal', y='Total Venda', color='Canal', text_auto='.2s', title="Faturamento por Canal")
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("Carregando dados do Dashboard...")
+        st.warning("⚠️ Nenhum dado encontrado no Dashboard.")
 
 # 2. POR CNPJ
 with tabs[1]:
-    df_cnpj = carregar_dados('cnpj')
+    with st.spinner("🏢 Carregando análise por CNPJ..."):
+        df_cnpj = carregar_dados('cnpj')
+    
     if not df_cnpj.empty:
         st.subheader("Análise por CNPJ")
         st.dataframe(df_cnpj.style.format({'Total Venda': 'R$ {:,.2f}', 'Lucro Bruto': 'R$ {:,.2f}'}), use_container_width=True)
@@ -249,11 +247,12 @@ with tabs[1]:
         fig = px.pie(df_cnpj, values='Total Venda', names='CNPJ', title='Distribuição de Vendas por CNPJ')
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("Carregando dados de CNPJ...")
+        st.warning("⚠️ Nenhum dado encontrado para CNPJ.")
 
 # 3. BCG GERAL
 with tabs[2]:
-    df_bcg = carregar_dados('bcg')
+    with st.spinner("⭐ Carregando Matriz BCG..."):
+        df_bcg = carregar_dados('bcg')
     if not df_bcg.empty:
         st.subheader("Matriz BCG Geral")
         
@@ -608,8 +607,7 @@ with tabs[9]:
         with col2:
             if st.button("🔄 Resetar Análise do Dia", help="Limpa todos os dados acumulados"):
                 analyzer.reset_daily_analysis(data_str)
-                st.success("✅ Análise resetada!")
-                st.rerun()
+                st.success("✅ Análise resetada! Atualize a página para ver as mudanças.")
         
         # Verificar se a data mudou
         if st.session_state.current_date != data_str:
@@ -704,8 +702,7 @@ with tabs[9]:
                                 'total_units': df_vendas['quantidade'].sum()
                             }
                         
-                        st.success(f"✅ Vendas de {marketplace_nome} processadas com sucesso!")
-                        st.rerun()
+                        st.success(f"✅ Vendas de {marketplace_nome} processadas com sucesso! Role para baixo para ver os resultados.")
             
             except Exception as e:
                 st.error(f"❌ Erro ao processar arquivo: {e}")

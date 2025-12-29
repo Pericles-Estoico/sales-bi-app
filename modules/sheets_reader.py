@@ -49,11 +49,7 @@ class SheetsReader:
                 self.spreadsheet = self.client.open_by_key(self.spreadsheet_id)
                 self.use_api = True
                 
-                print("✅ Google Sheets API inicializada com sucesso!")
-                
         except Exception as e:
-            print(f"⚠️  Google Sheets API não disponível: {e}")
-            print("   Usando fallback para CSV export")
             self.use_api = False
     
     def read_sheet_by_gid(self, gid, sheet_name=None):
@@ -74,8 +70,8 @@ class SheetsReader:
                 df = self._read_via_api(sheet_name)
                 if not df.empty:
                     return df
-            except Exception as e:
-                print(f"⚠️  Falha na leitura via API para {sheet_name}: {e}")
+            except Exception:
+                pass  # Silenciar erro e tentar CSV
         
         # Método 2: Fallback para CSV export
         return self._read_via_csv_export(gid)
@@ -94,12 +90,9 @@ class SheetsReader:
             # Cria DataFrame
             df = pd.DataFrame(data[1:], columns=data[0])
             
-            print(f"✅ Lido via API: {sheet_name} ({len(df)} linhas)")
-            
             return df
             
-        except Exception as e:
-            print(f"❌ Erro ao ler via API: {e}")
+        except Exception:
             return pd.DataFrame()
     
     def _read_via_csv_export(self, gid):
@@ -112,16 +105,13 @@ class SheetsReader:
             
             # Verifica se não é página de erro HTML
             if response.text.startswith('<!DOCTYPE'):
-                raise Exception("Aba retornou HTML (provavelmente tem fórmulas complexas)")
+                return pd.DataFrame()
             
             df = pd.read_csv(StringIO(response.text))
             
-            print(f"✅ Lido via CSV: gid={gid} ({len(df)} linhas)")
-            
             return df
             
-        except Exception as e:
-            print(f"❌ Erro ao ler via CSV export (gid={gid}): {e}")
+        except Exception:
             return pd.DataFrame()
     
     def get_status(self):
