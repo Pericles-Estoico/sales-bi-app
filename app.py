@@ -31,13 +31,21 @@ st.set_page_config(page_title="Sales BI Pro", page_icon="📊", layout="wide")
 BASE_URL = "https://docs.google.com/spreadsheets/d/1qoUk6AsNXLpHyzRrZplM4F5573zN9hUwQTNVUF3UC8E/export?format=csv"
 
 URLS = {
-    'detalhes': f"{BASE_URL}&gid=961459380",      # 6. Detalhes
-    'dashboard': f"{BASE_URL}&gid=1526866348",    # 1. Dashboard Geral
-    'cnpj': f"{BASE_URL}&gid=1262664738",         # 2. Análise por CNPJ
-    'bcg': f"{BASE_URL}&gid=182362507",           # 5. Matriz BCG
-    'precos': f"{BASE_URL}&gid=1763860078",       # 4. Preços Marketplaces
-    'giro': f"{BASE_URL}&gid=1226903383",         # 7. Giro de Produtos
-    'oportunidades': f"{BASE_URL}&gid=1768393863" # 8. Oportunidades
+    'produtos': f"{BASE_URL}&gid=1037607798",     # Produtos (primeira aba)
+    'kits': f"{BASE_URL}&gid=1569485799",         # Kits
+    'custos_pedido': f"{BASE_URL}&gid=1720329296", # Custos por Pedido
+    'canais': f"{BASE_URL}&gid=1639432432",       # Canais
+    'impostos': f"{BASE_URL}&gid=260097325",      # Impostos
+    'frete': f"{BASE_URL}&gid=1928835495",        # Frete
+    'metas': f"{BASE_URL}&gid=1477190272",        # Metas
+    'dashboard': f"{BASE_URL}&gid=749174572",     # 1. Dashboard Geral (CORRIGIDO)
+    'detalhes': f"{BASE_URL}&gid=961459380",      # 6. Detalhes (já estava correto)
+    'cnpj': f"{BASE_URL}&gid=1218055125",         # 2. Análise por CNPJ (CORRIGIDO)
+    'executiva': f"{BASE_URL}&gid=175434857",     # 3. Análise Executiva
+    'precos': f"{BASE_URL}&gid=1141986740",       # 4. Preços Marketplaces (CORRIGIDO)
+    'bcg': f"{BASE_URL}&gid=1589145111",          # 5. Matriz BCG (CORRIGIDO)
+    'giro': f"{BASE_URL}&gid=364031804",          # 7. Giro de Produtos (CORRIGIDO)
+    'oportunidades': f"{BASE_URL}&gid=563501913"  # 8. Oportunidades (CORRIGIDO)
 }
 
 # ==============================================================================
