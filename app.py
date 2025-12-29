@@ -12,6 +12,7 @@ import math
 from io import StringIO
 import xlsxwriter
 import plotly.express as px
+from modules.sheets_reader import SheetsReader
 
 # ==============================================================================
 # VERSÃO V56 - INTEGRAÇÃO COM GESTÃO DE ESTOQUE
@@ -26,27 +27,32 @@ import plotly.express as px
 st.set_page_config(page_title="Sales BI Pro", page_icon="📊", layout="wide")
 
 # ==============================================================================
-# CONFIGURAÇÕES DE URLS (GIDs Mapeados)
+# CONFIGURAÇÕES DE GOOGLE SHEETS
 # ==============================================================================
-BASE_URL = "https://docs.google.com/spreadsheets/d/1qoUk6AsNXLpHyzRrZplM4F5573zN9hUwQTNVUF3UC8E/export?format=csv"
+SPREADSHEET_ID = "1qoUk6AsNXLpHyzRrZplM4F5573zN9hUwQTNVUF3UC8E"
+BASE_URL = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/export?format=csv"
 
-URLS = {
-    'produtos': f"{BASE_URL}&gid=1037607798",     # Produtos (primeira aba)
-    'kits': f"{BASE_URL}&gid=1569485799",         # Kits
-    'custos_pedido': f"{BASE_URL}&gid=1720329296", # Custos por Pedido
-    'canais': f"{BASE_URL}&gid=1639432432",       # Canais
-    'impostos': f"{BASE_URL}&gid=260097325",      # Impostos
-    'frete': f"{BASE_URL}&gid=1928835495",        # Frete
-    'metas': f"{BASE_URL}&gid=1477190272",        # Metas
-    'dashboard': f"{BASE_URL}&gid=749174572",     # 1. Dashboard Geral (CORRIGIDO)
-    'detalhes': f"{BASE_URL}&gid=961459380",      # 6. Detalhes (já estava correto)
-    'cnpj': f"{BASE_URL}&gid=1218055125",         # 2. Análise por CNPJ (CORRIGIDO)
-    'executiva': f"{BASE_URL}&gid=175434857",     # 3. Análise Executiva
-    'precos': f"{BASE_URL}&gid=1141986740",       # 4. Preços Marketplaces (CORRIGIDO)
-    'bcg': f"{BASE_URL}&gid=1589145111",          # 5. Matriz BCG (CORRIGIDO)
-    'giro': f"{BASE_URL}&gid=364031804",          # 7. Giro de Produtos (CORRIGIDO)
-    'oportunidades': f"{BASE_URL}&gid=563501913"  # 8. Oportunidades (CORRIGIDO)
+# Mapeamento: tipo → (GID, Nome da Aba)
+SHEET_MAPPING = {
+    'produtos': (1037607798, 'Produtos'),
+    'kits': (1569485799, 'Kits'),
+    'custos_pedido': (1720329296, 'Custos por Pedido'),
+    'canais': (1639432432, 'Canais'),
+    'impostos': (260097325, 'Impostos'),
+    'frete': (1928835495, 'Frete'),
+    'metas': (1477190272, 'Metas'),
+    'dashboard': (749174572, '1. Dashboard Geral'),
+    'detalhes': (961459380, '6. Detalhes'),
+    'cnpj': (1218055125, '2. Análise por CNPJ'),
+    'executiva': (175434857, '3. Análise Executiva'),
+    'precos': (1141986740, '4. Preços Marketplaces'),
+    'bcg': (1589145111, '5. Matriz BCG'),
+    'giro': (364031804, '7. Giro de Produtos'),
+    'oportunidades': (563501913, '8. Oportunidades')
 }
+
+# URLs para fallback CSV (mantido para compatibilidade)
+URLS = {k: f"{BASE_URL}&gid={v[0]}" for k, v in SHEET_MAPPING.items()}
 
 # ==============================================================================
 # CONSTANTES E MAPEAMENTOS
@@ -103,17 +109,34 @@ def normalizar(texto):
     return texto.lower().strip()
 
 # ==============================================================================
+# INICIALIZAÇÃO DO LEITOR DE SHEETS
+# ==============================================================================
+@st.cache_resource
+def get_sheets_reader():
+    """Inicializa o leitor de Google Sheets (cached)"""
+    return SheetsReader(SPREADSHEET_ID)
+
+# ==============================================================================
 # FUNÇÃO DE CARREGAMENTO DE DADOS (CACHEADA)
 # ==============================================================================
 @st.cache_data(ttl=300)
 def carregar_dados(tipo):
-    url = URLS.get(tipo)
-    if not url: return pd.DataFrame()
+    """
+    Carrega dados de uma aba do Google Sheets
+    Tenta usar Google Sheets API primeiro, cai de volta para CSV export
+    """
+    if tipo not in SHEET_MAPPING:
+        return pd.DataFrame()
+    
+    gid, sheet_name = SHEET_MAPPING[tipo]
     
     try:
-        r = requests.get(url, timeout=15)
-        r.raise_for_status()
-        df = pd.read_csv(StringIO(r.text))
+        # Usa o leitor inteligente
+        reader = get_sheets_reader()
+        df = reader.read_sheet_by_gid(gid, sheet_name)
+        
+        if df.empty:
+            return df
         
         # Limpeza Genérica
         for col in df.columns:
@@ -127,6 +150,7 @@ def carregar_dados(tipo):
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
                 
         return df
+        
     except Exception as e:
         st.error(f"Erro ao carregar dados de {tipo}: {e}")
         return pd.DataFrame()
@@ -135,6 +159,21 @@ def carregar_dados(tipo):
 # INTERFACE PRINCIPAL
 # ==============================================================================
 st.sidebar.title("🔧 Status da Conexão")
+
+# Mostra status do leitor
+try:
+    reader = get_sheets_reader()
+    status = reader.get_status()
+    
+    if status['realtime']:
+        st.sidebar.success(f"**{status['method']}**")
+        st.sidebar.info("✅ Dados em tempo real das abas originais")
+    else:
+        st.sidebar.warning(f"**{status['method']}**")
+        st.sidebar.warning("⚠️ Algumas abas podem não funcionar (fórmulas complexas)")
+        st.sidebar.info("💡 Configure Google Sheets API para acesso completo")
+except Exception as e:
+    st.sidebar.error(f"❌ Erro: {e}")
 
 # MODO SIMULAÇÃO (SANDBOX)
 if 'sandbox_mode' not in st.session_state:
