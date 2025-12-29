@@ -154,10 +154,23 @@ class InventoryIntegration:
         Returns:
             pd.DataFrame: Produtos faltantes com informações da BCG
         """
+        # Se DataFrames vazios, retornar vazio
+        if df_bcg.empty or df_estoque.empty:
+            return pd.DataFrame()
+        
+        # Detectar coluna de código na BCG (pode ser 'Código', 'codigo', 'Cdigo', etc.)
+        col_codigo_bcg = None
+        for possivel_col in ['Código', 'Codigo', 'codigo', 'Cdigo', 'CODIGO']:
+            if possivel_col in df_bcg.columns:
+                col_codigo_bcg = possivel_col
+                break
+        
+        # Se não encontrou coluna de código, retornar vazio
+        if col_codigo_bcg is None:
+            return pd.DataFrame()
+        
         # Normalizar códigos para comparação
-        codigos_bcg = set()
-        if 'Código' in df_bcg.columns:
-            codigos_bcg = set(df_bcg['Código'].apply(self.normalizar_texto))
+        codigos_bcg = set(df_bcg[col_codigo_bcg].apply(self.normalizar_texto))
         
         codigos_estoque = set()
         if 'codigo' in df_estoque.columns:
@@ -166,9 +179,13 @@ class InventoryIntegration:
         # Encontrar faltantes
         faltantes_norm = codigos_bcg - codigos_estoque
         
+        # Se não há faltantes, retornar vazio
+        if not faltantes_norm:
+            return pd.DataFrame()
+        
         # Filtrar DataFrame original
         df_bcg_norm = df_bcg.copy()
-        df_bcg_norm['codigo_normalizado'] = df_bcg_norm['Código'].apply(self.normalizar_texto)
+        df_bcg_norm['codigo_normalizado'] = df_bcg_norm[col_codigo_bcg].apply(self.normalizar_texto)
         
         df_faltantes = df_bcg_norm[df_bcg_norm['codigo_normalizado'].isin(faltantes_norm)].copy()
         
@@ -199,15 +216,32 @@ class InventoryIntegration:
         if df_faltantes.empty:
             return None
         
+        # Detectar coluna de código
+        col_codigo = None
+        for possivel_col in ['Código', 'Codigo', 'codigo', 'Cdigo', 'CODIGO']:
+            if possivel_col in df_faltantes.columns:
+                col_codigo = possivel_col
+                break
+        
+        if col_codigo is None:
+            return None
+        
+        # Detectar coluna de custo
+        col_custo = None
+        for possivel_col in ['Custo (R$)', 'Custo', 'custo', 'custo_unitario']:
+            if possivel_col in df_faltantes.columns:
+                col_custo = possivel_col
+                break
+        
         # Criar DataFrame no formato template_estoque
         df_upload = pd.DataFrame({
-            'codigo': df_faltantes['Código'].values,
-            'nome': df_faltantes['Código'].apply(lambda x: f"Produto {x}").values,  # Nome genérico
+            'codigo': df_faltantes[col_codigo].values,
+            'nome': df_faltantes[col_codigo].apply(lambda x: f"Produto {x}").values,  # Nome genérico
             'categoria': 'Produtos BCG',
             'estoque_atual': 0,
             'estoque_min': 0,
             'estoque_max': 0,
-            'custo_unitario': df_faltantes['Custo (R$)'].apply(self.normalizar_decimal).values if 'Custo (R$)' in df_faltantes.columns else 0,
+            'custo_unitario': df_faltantes[col_custo].apply(self.normalizar_decimal).values if col_custo else 0,
             'eh_kit': '',
             'componentes': '',
             'quantidades': ''

@@ -436,7 +436,9 @@ with tabs[8]:
                 
                 # Mostrar produtos faltantes
                 st.markdown("#### Produtos Faltantes")
-                st.dataframe(df_faltantes[['Código', 'Custo (R$)', 'Preço Venda (R$)']].head(20), 
+                # Mostrar apenas colunas que existem
+                cols_disponiveis = [col for col in df_faltantes.columns if col not in ['codigo_normalizado', 'ordem_alerta']]
+                st.dataframe(df_faltantes[cols_disponiveis[:5]].head(20), 
                            use_container_width=True)
                 
                 # Gerar Excel para download
