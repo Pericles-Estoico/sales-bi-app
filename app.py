@@ -231,7 +231,7 @@ with tabs[0]:
         
         st.subheader("Vendas por Canal")
         fig = px.bar(df_dashboard, x='Canal', y='Total Venda', color='Canal', text_auto='.2s', title="Faturamento por Canal")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     else:
         st.warning("⚠️ Nenhum dado encontrado no Dashboard.")
 
@@ -242,10 +242,10 @@ with tabs[1]:
     
     if not df_cnpj.empty:
         st.subheader("Análise por CNPJ")
-        st.dataframe(df_cnpj.style.format({'Total Venda': 'R$ {:,.2f}', 'Lucro Bruto': 'R$ {:,.2f}'}), use_container_width=True)
+        st.dataframe(df_cnpj.style.format({'Total Venda': 'R$ {:,.2f}', 'Lucro Bruto': 'R$ {:,.2f}'}), width="stretch")
         
         fig = px.pie(df_cnpj, values='Total Venda', names='CNPJ', title='Distribuição de Vendas por CNPJ')
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     else:
         st.warning("⚠️ Nenhum dado encontrado para CNPJ.")
 
@@ -281,8 +281,8 @@ with tabs[2]:
         fig.add_hline(y=med_qtd, line_dash="dash", line_color="gray", annotation_text="Média Qtd")
         fig.add_vline(x=med_margem, line_dash="dash", line_color="gray", annotation_text="Média Margem")
         
-        st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(df_bcg_filt, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
+        st.dataframe(df_bcg_filt, width="stretch")
     else:
         st.info("Carregando dados da BCG...")
 
@@ -299,7 +299,7 @@ with tabs[4]:
     df_precos = carregar_dados('precos')
     if not df_precos.empty:
         st.subheader("Monitoramento de Preços")
-        st.dataframe(df_precos, use_container_width=True)
+        st.dataframe(df_precos, width="stretch")
     else:
         st.info("Carregando dados de Preços...")
 
@@ -308,7 +308,7 @@ with tabs[5]:
     df_detalhes = carregar_dados('detalhes')
     if not df_detalhes.empty:
         st.subheader("Base de Dados Completa")
-        st.dataframe(df_detalhes, use_container_width=True)
+        st.dataframe(df_detalhes, width="stretch")
     else:
         st.info("Carregando detalhes...")
 
@@ -317,7 +317,7 @@ with tabs[6]:
     df_giro = carregar_dados('giro')
     if not df_giro.empty:
         st.subheader("Giro de Estoque")
-        st.dataframe(df_giro, use_container_width=True)
+        st.dataframe(df_giro, width="stretch")
     else:
         st.info("Carregando dados de Giro...")
 
@@ -326,7 +326,7 @@ with tabs[7]:
     df_oportunidades = carregar_dados('oportunidades')
     if not df_oportunidades.empty:
         st.subheader("🚀 Oportunidades Identificadas")
-        st.dataframe(df_oportunidades, use_container_width=True)
+        st.dataframe(df_oportunidades, width="stretch")
     else:
         st.info("Carregando oportunidades...")
 
@@ -346,12 +346,18 @@ with tabs[8]:
         st.info("💡 Aguarde alguns minutos para o Streamlit atualizar os arquivos do GitHub.")
         st.stop()
     
-    # Carregar dados de estoque
-    with st.spinner("Carregando dados de estoque..."):
-        df_estoque = inv_integration.carregar_estoque()
+    # Carregar dados de estoque (com cache no session_state)
+    if 'estoque_cache' not in st.session_state:
+        with st.spinner("📦 Carregando dados de estoque..."):
+            st.session_state.estoque_cache = inv_integration.carregar_estoque()
+    
+    df_estoque = st.session_state.estoque_cache
     
     if df_estoque.empty:
         st.error("❌ Não foi possível carregar dados de estoque da planilha template_estoque")
+        if st.button("🔄 Tentar Novamente"):
+            del st.session_state.estoque_cache
+            st.rerun()
     else:
         # ==============================================================
         # SEÇÃO 1: ESTATÍSTICAS GERAIS
@@ -420,7 +426,7 @@ with tabs[8]:
                 
                 st.dataframe(
                     df_filtrado[colunas_disponiveis],
-                    use_container_width=True,
+                    width="stretch",
                     height=400
                 )
                 
@@ -439,7 +445,7 @@ with tabs[8]:
                     
                     st.dataframe(
                         df_ruptura[colunas_disp_ruptura],
-                        use_container_width=True
+                        width="stretch"
                     )
                     
                     if 'investimento_reposicao' in resumo:
@@ -485,7 +491,7 @@ with tabs[8]:
                 # Mostrar apenas colunas que existem
                 cols_disponiveis = [col for col in df_faltantes.columns if col not in ['codigo_normalizado', 'ordem_alerta']]
                 st.dataframe(df_faltantes[cols_disponiveis[:5]].head(20), 
-                           use_container_width=True)
+                           width="stretch")
                 
                 # Gerar Excel para download
                 st.markdown("#### 📥 Exportar para Upload Manual")
@@ -560,7 +566,7 @@ with tabs[8]:
         # Exibir tabela
         st.dataframe(
             df_estoque_filtrado,
-            use_container_width=True,
+            width="stretch",
             height=500
         )
         
@@ -684,7 +690,7 @@ with tabs[9]:
                     
                     # Mostrar preview
                     st.markdown(f"**Preview - {marketplace_nome}:**")
-                    st.dataframe(df_vendas.head(10), use_container_width=True)
+                    st.dataframe(df_vendas.head(10), width="stretch")
                     
                     # Botão processar
                     if st.button(f"✅ Processar Vendas - {marketplace_nome}", type="primary"):
@@ -752,7 +758,7 @@ with tabs[9]:
             
             st.dataframe(
                 df_display,
-                use_container_width=True,
+                width="stretch",
                 height=400
             )
             

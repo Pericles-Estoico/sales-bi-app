@@ -2,7 +2,7 @@
 Módulos de análise do Sales BI Pro
 """
 
-from .inventory_integration import InventoryIntegration
-from .rupture_analysis import RuptureAnalysis
+# Não importar automaticamente módulos que usam Streamlit
+# Isso evita loops infinitos e imports circulares
 
-__all__ = ['InventoryIntegration', 'RuptureAnalysis']
+__all__ = []
