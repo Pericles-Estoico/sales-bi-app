@@ -217,7 +217,7 @@ st.title("📊 Sales BI Pro")
 
 tabs = st.tabs([
     "📈 Visão Geral", "🏢 Por CNPJ", "⭐ BCG Geral", "🎯 BCG por Canal", 
-    "💲 Preços", "📝 Detalhes", "🔄 Giro de Produtos", "🚀 Oportunidades", "📦 Gestão de Estoque"
+    "💲 Preços", "📝 Detalhes", "🔄 Giro de Produtos", "🚀 Oportunidades", "📦 Gestão de Estoque", "📋 Relatório de Produção"
 ])
 
 # 1. VISÃO GERAL
@@ -566,3 +566,253 @@ with tabs[8]:
         )
         
         st.caption(f"📊 Exibindo {len(df_estoque_filtrado)} de {len(df_estoque)} produtos")
+
+# ==============================================================================
+# 10. RELATÓRIO DE PRODUÇÃO
+# ==============================================================================
+with tabs[9]:
+    st.title("📋 Relatório de Produção")
+    st.markdown("""
+    **Fluxo de Trabalho:**
+    1. 📤 Faça upload de arquivos de vendas por marketplace (Excel/CSV)
+    2. 🔍 O sistema verifica estoque e decompõe kits automaticamente
+    3. 📊 Analisa necessidades acumuladas do dia
+    4. 📥 Baixe relatórios por marketplace ou consolidado do dia
+    """)
+    
+    # Importar módulos necessários
+    try:
+        from modules.production_analyzer import ProductionAnalyzer
+        from modules.production_report_generator import ProductionReportGenerator
+        from datetime import datetime
+        
+        # Inicializar analyzer
+        analyzer = ProductionAnalyzer()
+        report_gen = ProductionReportGenerator()
+        
+        # ==============================================================
+        # SEÇÃO 1: CONFIGURAÇÃO DA DATA
+        # ==============================================================
+        st.markdown("### 📅 Configuração da Análise")
+        
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            data_analise = st.date_input(
+                "Data de análise:",
+                value=datetime.now(),
+                help="Todas as vendas do dia serão acumuladas"
+            )
+            data_str = data_analise.strftime('%Y-%m-%d')
+        
+        with col2:
+            if st.button("🔄 Resetar Análise do Dia", help="Limpa todos os dados acumulados"):
+                analyzer.reset_daily_analysis(data_str)
+                st.success("✅ Análise resetada!")
+                st.rerun()
+        
+        # Verificar se a data mudou
+        if st.session_state.current_date != data_str:
+            analyzer.reset_daily_analysis(data_str)
+            st.info(f"📅 Nova data selecionada: {data_str}")
+        
+        st.divider()
+        
+        # ==============================================================
+        # SEÇÃO 2: CARREGAR DADOS BASE
+        # ==============================================================
+        with st.spinner("🔄 Carregando dados de produtos, kits e estoque..."):
+            # Carregar produtos
+            df_produtos = carregar_dados('produtos')
+            analyzer.load_produtos(df_produtos)
+            
+            # Carregar kits
+            df_kits = carregar_dados('kits')
+            analyzer.load_kits(df_kits)
+            
+            # Carregar estoque
+            TEMPLATE_ESTOQUE_URL = "https://docs.google.com/spreadsheets/d/1PpiMQingHf4llA03BiPIuPJPIZqul4grRU_emWDEK1o/export?format=csv&gid=0"
+            try:
+                df_estoque = pd.read_csv(TEMPLATE_ESTOQUE_URL)
+                analyzer.load_estoque(df_estoque)
+            except Exception as e:
+                st.warning(f"⚠️ Não foi possível carregar estoque: {e}")
+                analyzer.load_estoque(pd.DataFrame())
+        
+        st.success(f"✅ Dados carregados: {len(df_produtos)} produtos, {len(df_kits)} kits")
+        
+        st.divider()
+        
+        # ==============================================================
+        # SEÇÃO 3: UPLOAD DE VENDAS
+        # ==============================================================
+        st.markdown("### 📤 Upload de Vendas por Marketplace")
+        
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            marketplace_nome = st.selectbox(
+                "Marketplace:",
+                options=["Mercado Livre", "Shopee 1:50", "Shopee Matriz", "Shein", "Outros"],
+                help="Selecione o marketplace das vendas"
+            )
+        
+        with col2:
+            uploaded_vendas = st.file_uploader(
+                "Arquivo de vendas (Excel/CSV):",
+                type=["xlsx", "xls", "csv"],
+                help="Deve ter colunas: código, quantidade"
+            )
+        
+        if uploaded_vendas:
+            try:
+                # Ler arquivo
+                if uploaded_vendas.name.endswith('.csv'):
+                    df_vendas = pd.read_csv(uploaded_vendas)
+                else:
+                    df_vendas = pd.read_excel(uploaded_vendas)
+                
+                # Verificar colunas
+                cols_lower = [col.lower() for col in df_vendas.columns]
+                if 'código' not in cols_lower and 'codigo' not in cols_lower:
+                    st.error("❌ Arquivo deve ter coluna 'código' ou 'codigo'")
+                elif 'quantidade' not in cols_lower:
+                    st.error("❌ Arquivo deve ter coluna 'quantidade'")
+                else:
+                    # Normalizar nomes de colunas
+                    df_vendas.columns = [col.lower() for col in df_vendas.columns]
+                    if 'codigo' in df_vendas.columns:
+                        df_vendas.rename(columns={'codigo': 'código'}, inplace=True)
+                    
+                    # Mostrar preview
+                    st.markdown(f"**Preview - {marketplace_nome}:**")
+                    st.dataframe(df_vendas.head(10), use_container_width=True)
+                    
+                    # Botão processar
+                    if st.button(f"✅ Processar Vendas - {marketplace_nome}", type="primary"):
+                        with st.spinner("🔄 Analisando vendas e verificando estoque..."):
+                            # Analisar vendas (acumula automaticamente)
+                            needs = analyzer.analyze_sales(df_vendas, marketplace_nome)
+                            
+                            # Verificar estoque
+                            needs = analyzer.check_inventory(needs)
+                            
+                            # Salvar relatório do marketplace
+                            st.session_state.marketplace_reports[marketplace_nome] = {
+                                'date': data_str,
+                                'total_skus': len(df_vendas),
+                                'total_units': df_vendas['quantidade'].sum()
+                            }
+                        
+                        st.success(f"✅ Vendas de {marketplace_nome} processadas com sucesso!")
+                        st.rerun()
+            
+            except Exception as e:
+                st.error(f"❌ Erro ao processar arquivo: {e}")
+        
+        st.divider()
+        
+        # ==============================================================
+        # SEÇÃO 4: RESUMO ACUMULADO
+        # ==============================================================
+        if st.session_state.production_needs:
+            st.markdown("### 📊 Resumo Acumulado do Dia")
+            
+            needs = st.session_state.production_needs
+            
+            # Métricas
+            total_produtos = len(needs)
+            total_faltantes = sum(1 for n in needs.values() if n.quantidade_faltante > 0)
+            total_unidades_faltantes = sum(n.quantidade_faltante for n in needs.values())
+            marketplaces_processados = list(st.session_state.marketplace_reports.keys())
+            
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("📦 Produtos Analisados", total_produtos)
+            col2.metric("🚨 Produtos Faltantes", total_faltantes)
+            col3.metric("📦 Unidades a Produzir", total_unidades_faltantes)
+            col4.metric("🛒 Marketplaces", len(marketplaces_processados))
+            
+            # Mostrar quais marketplaces foram processados
+            if marketplaces_processados:
+                st.info(f"**Marketplaces processados:** {', '.join(marketplaces_processados)}")
+            
+            st.divider()
+            
+            # ==============================================================
+            # SEÇÃO 5: TABELA DE NECESSIDADES
+            # ==============================================================
+            st.markdown("### 📋 Tabela de Necessidades")
+            
+            df_summary = report_gen.generate_summary_dataframe(needs)
+            
+            # Filtrar apenas faltantes
+            mostrar_todos = st.checkbox("Mostrar todos os produtos (incluindo com estoque OK)", value=False)
+            
+            if not mostrar_todos:
+                df_display = df_summary[df_summary['🚨 Faltante'] > 0].copy()
+            else:
+                df_display = df_summary.copy()
+            
+            st.dataframe(
+                df_display,
+                use_container_width=True,
+                height=400
+            )
+            
+            st.caption(f"📊 Exibindo {len(df_display)} de {len(df_summary)} produtos")
+            
+            st.divider()
+            
+            # ==============================================================
+            # SEÇÃO 6: DOWNLOAD DE RELATÓRIOS
+            # ==============================================================
+            st.markdown("### 📥 Download de Relatórios")
+            
+            col1, col2 = st.columns(2)
+            
+            # Relatórios por marketplace
+            with col1:
+                st.markdown("**📦 Relatórios por Marketplace:**")
+                
+                for mktp in marketplaces_processados:
+                    excel_file = report_gen.generate_marketplace_report(mktp, data_str, needs)
+                    
+                    mktp_info = st.session_state.marketplace_reports[mktp]
+                    st.download_button(
+                        label=f"📥 {mktp} ({mktp_info['total_skus']} SKUs)",
+                        data=excel_file,
+                        file_name=f"producao_{mktp.lower().replace(' ', '_')}_{data_str}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        help=f"Total: {mktp_info['total_units']} unidades vendidas"
+                    )
+            
+            # Relatório consolidado
+            with col2:
+                st.markdown("**📊 Relatório Consolidado:**")
+                
+                if len(marketplaces_processados) > 0:
+                    excel_consolidado = report_gen.generate_daily_consolidated_report(
+                        data_str, 
+                        needs, 
+                        marketplaces_processados
+                    )
+                    
+                    st.download_button(
+                        label=f"📥 Relatório do Dia ({len(marketplaces_processados)} marketplaces)",
+                        data=excel_consolidado,
+                        file_name=f"producao_consolidado_{data_str}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        help=f"{total_unidades_faltantes} unidades a produzir",
+                        type="primary"
+                    )
+        
+        else:
+            st.info("📤 Faça upload de arquivos de vendas para começar a análise.")
+    
+    except ImportError as e:
+        st.error(f"❌ Erro ao importar módulos: {e}")
+        st.info("💡 Certifique-se de que os módulos production_analyzer.py e production_report_generator.py existem.")
+    except Exception as e:
+        st.error(f"❌ Erro inesperado: {e}")
+        import traceback
+        st.code(traceback.format_exc())
