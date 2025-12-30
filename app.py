@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
 import json
 import unicodedata
 import io
@@ -116,37 +116,33 @@ def safe_int(x, default=0):
 # ==============================================================================
 def get_gspread_client():
     try:
-        # Tenta carregar secrets do formato TOML (Streamlit Cloud)
         if "GOOGLE_SHEETS_CREDENTIALS" in st.secrets:
-            # Pega o objeto direto dos secrets
             creds_data = st.secrets["GOOGLE_SHEETS_CREDENTIALS"]
             
-            # BLINDAGEM: Garante que seja um dicionário Python puro
+            # Garante formato de dicionário
             if isinstance(creds_data, str):
                 try:
                     creds_dict = json.loads(creds_data)
-                except json.JSONDecodeError:
-                    # Se falhar o json.loads, pode ser que o streamlit já tenha entregue um objeto AttrDict que parece string
-                    # Vamos tentar converter para dict forçadamente se for um objeto do streamlit
+                except:
                     creds_dict = dict(creds_data)
             elif hasattr(creds_data, 'to_dict'):
                 creds_dict = creds_data.to_dict()
-            elif isinstance(creds_data, dict):
-                creds_dict = creds_data
             else:
-                # Tenta converter qualquer outra coisa (AttrDict, etc) para dict padrão
                 creds_dict = dict(creds_data)
             
-            scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+            scope = [
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive"
+            ]
             
-            # Usa from_service_account_info em vez de from_json_keyfile_dict para evitar confusão de leitura de arquivo
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+            # Nova forma de autenticação (google-auth)
+            creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
             return gspread.authorize(creds)
         else:
-            st.error("Credenciais do Google Sheets não encontradas nos secrets.")
+            st.error("Credenciais não encontradas.")
             return None
     except Exception as e:
-        st.error(f"Erro na autenticação do Google Sheets: {e}")
+        st.error(f"Erro de Autenticação: {e}")
         return None
 
 def salvar_dados_sheets(df_novos_dados):
