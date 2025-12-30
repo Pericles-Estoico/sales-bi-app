@@ -286,8 +286,12 @@ if uploaded_file:
                 
                 if st.session_state.sandbox_mode:
                     st.success(f"TESTE: {len(df)} vendas simuladas na memória. Nada será salvo.")
+                    st.markdown("### 🧪 Dados Simulados")
+                    st.dataframe(df, use_container_width=True)
                 else:
                     st.info(f"PRÉ-VISUALIZAÇÃO: {len(df)} vendas prontas para importar. Confira os dados e use o botão abaixo para SALVAR.")
+                    st.markdown("### 📋 Dados Prontos para Importação")
+                    st.dataframe(df, use_container_width=True)
                 
             # Botão de Gravação Real com Trava de Segurança
             if 'novos_dados_temp' in st.session_state and not st.session_state.sandbox_mode:
