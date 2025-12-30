@@ -13,12 +13,11 @@ from io import StringIO
 import xlsxwriter
 
 # ==============================================================================
-# VERSÃO V53 - INTEGRAÇÃO COMPLETA COM TODAS AS ABAS
+# VERSÃO V54 - CORREÇÃO NOME DA ABA "Detalhes_Canais"
 # ==============================================================================
-# 1. Upload salva em "Detalhes Canais" (gid=961459380)
-# 2. Dashboard lê abas processadas (Dashboard Geral, BCG, Giro, etc.)
-# 3. Métricas CORRETAS da planilha (com todos os custos/impostos aplicados)
-# 4. Sistema de Metas com indicadores visuais (🟢🟡🔴)
+# 1. Upload salva em "Detalhes_Canais" (com underscore!)
+# 2. Dashboard lê abas processadas corretamente
+# 3. Sistema de metas com indicadores visuais
 # ==============================================================================
 
 st.set_page_config(page_title="Sales BI Pro", page_icon="📊", layout="wide")
@@ -132,7 +131,7 @@ def get_gspread_client():
         return None
 
 # ==============================================================================
-# SALVAMENTO (Upload vai para "Detalhes Canais")
+# SALVAMENTO (CORRIGIDO - Nome da aba com underscore)
 # ==============================================================================
 def salvar_dados_sheets(df_novos_dados):
     client = get_gspread_client()
@@ -141,7 +140,9 @@ def salvar_dados_sheets(df_novos_dados):
     
     try:
         sh = client.open_by_key(SHEET_ID)
-        worksheet = sh.worksheet("Detalhes Canais")
+        
+        # CORREÇÃO: Nome correto da aba com underscore
+        worksheet = sh.worksheet("Detalhes_Canais")
         
         colunas_planilha = worksheet.row_values(1)
         if not colunas_planilha:
@@ -160,10 +161,14 @@ def salvar_dados_sheets(df_novos_dados):
         
         if dados_lista:
             worksheet.append_rows(dados_lista, value_input_option='USER_ENTERED')
-            st.success(f"✅ {len(dados_lista)} registros salvos em 'Detalhes Canais'!")
+            st.success(f"✅ {len(dados_lista)} registros salvos em 'Detalhes_Canais'!")
             return True
         return False
             
+    except gspread.exceptions.WorksheetNotFound:
+        st.error("❌ Aba 'Detalhes_Canais' não encontrada!")
+        st.info("💡 Verifique se o nome da aba está correto na planilha.")
+        return False
     except Exception as e:
         st.error(f"❌ Erro ao salvar: {str(e)}")
         return False
@@ -223,11 +228,10 @@ def preparar_dados_para_salvar(df_raw, canal, cnpj, data_venda):
         return pd.DataFrame()
 
 # ==============================================================================
-# CARREGAMENTO DE DADOS (Dashboard lê abas processadas)
+# CARREGAMENTO DE DADOS (Dashboard)
 # ==============================================================================
 @st.cache_data(ttl=300)
 def carregar_aba(nome_aba):
-    """Carrega dados de uma aba específica com limpeza de formato brasileiro."""
     try:
         url = ABAS_URLS.get(nome_aba)
         if not url:
@@ -237,7 +241,6 @@ def carregar_aba(nome_aba):
         r.raise_for_status()
         df = pd.read_csv(StringIO(r.text))
         
-        # Limpa colunas monetárias
         for col in df.columns:
             if any(x in col.lower() for x in ['venda', 'lucro', 'custo', 'valor', 'total', 'r$']):
                 df[col] = df[col].apply(clean_currency)
@@ -253,38 +256,19 @@ def carregar_aba(nome_aba):
 
 @st.cache_data(ttl=300)
 def carregar_metas():
-    """Carrega metas da planilha."""
-    try:
-        df = carregar_aba('metas')
-        if df.empty:
-            return {
-                'margem_minima': 0.20,
-                'margem_ideal': 0.30,
-                'ticket_minimo': 45.0,
-                'ticket_ideal': 60.0
-            }
-        # Extrai valores da planilha (ajustar conforme estrutura real)
-        return {
-            'margem_minima': 0.20,
-            'margem_ideal': 0.30,
-            'ticket_minimo': 45.0,
-            'ticket_ideal': 60.0
-        }
-    except:
-        return {
-            'margem_minima': 0.20,
-            'margem_ideal': 0.30,
-            'ticket_minimo': 45.0,
-            'ticket_ideal': 60.0
-        }
+    return {
+        'margem_minima': 0.20,
+        'margem_ideal': 0.30,
+        'ticket_minimo': 45.0,
+        'ticket_ideal': 60.0
+    }
 
 def get_status_meta(valor, minimo, ideal, tipo='margem'):
-    """Retorna emoji de status baseado nas metas."""
     if tipo == 'margem':
         if valor >= ideal: return "🟢 Ideal"
         elif valor >= minimo: return "🟡 Atenção"
         else: return "🔴 Crítico"
-    else:  # ticket
+    else:
         if valor >= ideal: return "🟢 Ideal"
         elif valor >= minimo: return "🟡 Atenção"
         else: return "🔴 Crítico"
@@ -300,14 +284,13 @@ if st.sidebar.button("🔍 Testar Conexão"):
         try:
             sh = client.open_by_key(SHEET_ID)
             st.sidebar.success(f"✅ Conectado: {sh.title}")
-            ws = sh.worksheet("Detalhes Canais")
+            ws = sh.worksheet("Detalhes_Canais")
             st.sidebar.info(f"📊 Linhas: {ws.row_count}")
         except Exception as e:
             st.sidebar.error(f"❌ Erro: {e}")
 
 st.sidebar.divider()
 
-# MODO SIMULAÇÃO
 if 'sandbox_mode' not in st.session_state:
     st.session_state.sandbox_mode = False
 
@@ -390,7 +373,7 @@ if uploaded_file:
         st.error(f"❌ Erro: {str(e)}")
 
 # ==============================================================================
-# DASHBOARD (Lê abas processadas)
+# DASHBOARD
 # ==============================================================================
 st.title("📊 Sales BI Pro")
 
@@ -401,13 +384,12 @@ tabs = st.tabs([
 
 metas = carregar_metas()
 
-with tabs[0]:  # Dashboard Geral
+with tabs[0]:
     df_dash = carregar_aba('dashboard_geral')
     
     if not df_dash.empty:
         st.subheader("📊 Resumo por Canal")
         
-        # Calcula totais
         total_vendas = df_dash['Total Venda'].sum() if 'Total Venda' in df_dash.columns else 0
         total_lucro = df_dash['Lucro Bruto'].sum() if 'Lucro Bruto' in df_dash.columns else 0
         total_qtd = df_dash['Quantidade'].sum() if 'Quantidade' in df_dash.columns else 0
@@ -425,7 +407,6 @@ with tabs[0]:  # Dashboard Geral
         
         st.dataframe(df_dash, use_container_width=True)
         
-        # Gráfico de vendas por canal
         if 'Canal' in df_dash.columns and 'Total Venda' in df_dash.columns:
             st.subheader("📈 Vendas por Canal")
             vendas_canal = df_dash.set_index('Canal')['Total Venda'].sort_values(ascending=False)
@@ -433,7 +414,7 @@ with tabs[0]:  # Dashboard Geral
     else:
         st.info("📊 Carregando dados...")
 
-with tabs[1]:  # Resultado CNPJ
+with tabs[1]:
     df_cnpj = carregar_aba('resultado_cnpj')
     if not df_cnpj.empty:
         st.subheader("🏢 Análise por CNPJ")
@@ -441,7 +422,7 @@ with tabs[1]:  # Resultado CNPJ
     else:
         st.info("Sem dados")
 
-with tabs[2]:  # BCG por Canal
+with tabs[2]:
     df_bcg = carregar_aba('bcg_canal_mkt')
     if not df_bcg.empty:
         st.subheader("⭐ Matriz BCG por Canal")
@@ -449,7 +430,7 @@ with tabs[2]:  # BCG por Canal
     else:
         st.info("Sem dados")
 
-with tabs[3]:  # Preços MKTP
+with tabs[3]:
     df_precos = carregar_aba('preco_simples_mktp')
     if not df_precos.empty:
         st.subheader("💲 Análise de Preços por Marketplace")
@@ -457,20 +438,19 @@ with tabs[3]:  # Preços MKTP
     else:
         st.info("Sem dados")
 
-with tabs[4]:  # Giro SKU
+with tabs[4]:
     df_giro = carregar_aba('vendas_sku_geral')
     if not df_giro.empty:
         st.subheader("🔄 Giro de Produtos (Geral)")
         st.dataframe(df_giro, use_container_width=True)
         
-        # Gráfico Top 20
         if 'Quantidade' in df_giro.columns:
             top20 = df_giro.nlargest(20, 'Quantidade')
             st.bar_chart(top20.set_index('Produto')['Quantidade'] if 'Produto' in top20.columns else top20['Quantidade'])
     else:
         st.info("Sem dados")
 
-with tabs[5]:  # Oportunidades
+with tabs[5]:
     df_oport = carregar_aba('oportunidades_canais_mkt')
     if not df_oport.empty:
         st.subheader("🚀 Oportunidades por Canal")
