@@ -194,13 +194,23 @@ if uploaded_file:
         
         # Normalização de colunas
         cols_map = {c: normalizar(c) for c in df.columns}
-        col_produto = next((k for k, v in cols_map.items() if 'produto' in v or 'descricao' in v), None)
+        col_produto = next((k for k, v in cols_map.items() if 'produto' in v or 'descricao' in v or 'codigo' in v), None)
         col_qtd = next((k for k, v in cols_map.items() if 'quantidade' in v or 'qtd' in v), None)
         
+        col_valor = next((k for k, v in cols_map.items() if 'valor' in v or 'total' in v), None)
+
         if col_produto and col_qtd:
-            df = df.rename(columns={col_produto: 'Produto', col_qtd: 'Quantidade'})
+            rename_dict = {col_produto: 'Produto', col_qtd: 'Quantidade'}
+            if col_valor:
+                rename_dict[col_valor] = 'Total Venda'
+            
+            df = df.rename(columns=rename_dict)
             df['Produto'] = df['Produto'].astype(str).str.strip()
             df['Quantidade'] = pd.to_numeric(df['Quantidade'], errors='coerce').fillna(1).astype(int)
+            
+            if 'Total Venda' in df.columns:
+                df['Total Venda'] = pd.to_numeric(df['Total Venda'], errors='coerce').fillna(0.0)
+            
             df['Canal'] = CHANNELS[canal]
             
             # Botão de Simulação
