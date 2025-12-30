@@ -13,12 +13,12 @@ from io import StringIO
 import xlsxwriter
 
 # ==============================================================================
-# VERSÃO V51 - CORREÇÃO COMPLETA DE UPLOAD
+# VERSÃO V52 - CORREÇÃO DE LIMPEZA DE DADOS
 # ==============================================================================
 # 1. Autenticação blindada funcionando
 # 2. Salvamento seguro validado
-# 3. Preparação de dados com tratamento de erros robusto
-# 4. Compatível com Python 3.13 e Pandas 2.2+
+# 3. Limpeza ROBUSTA de dados históricos (formato brasileiro R$, vírgulas)
+# 4. Cálculos de métricas corrigidos
 # ==============================================================================
 
 st.set_page_config(page_title="Sales BI Pro", page_icon="📊", layout="wide")
@@ -238,27 +238,23 @@ def salvar_dados_sheets(df_novos_dados):
         return False
 
 # ==============================================================================
-# PREPARAÇÃO DE DADOS (CORRIGIDA E ROBUSTA)
+# PREPARAÇÃO DE DADOS
 # ==============================================================================
 def preparar_dados_para_salvar(df_raw, canal, cnpj, data_venda):
     """
     Garante que o DataFrame tenha TODAS as colunas esperadas antes de salvar.
-    VERSÃO CORRIGIDA com tratamento de erros robusto.
     """
     try:
         df_prep = df_raw.copy()
         
-        # Validação básica
         if df_prep.empty:
             st.error("❌ DataFrame vazio!")
             return pd.DataFrame()
         
-        # Adiciona colunas obrigatórias
         df_prep['Data'] = data_venda.strftime("%Y-%m-%d")
         df_prep['Canal'] = CHANNELS.get(canal, canal)
         df_prep['CNPJ'] = cnpj
         
-        # Valida colunas essenciais
         if 'Produto' not in df_prep.columns:
             st.error("❌ Coluna 'Produto' não encontrada!")
             st.info(f"Colunas encontradas: {', '.join(df_prep.columns)}")
@@ -269,17 +265,14 @@ def preparar_dados_para_salvar(df_raw, canal, cnpj, data_venda):
             st.info(f"Colunas encontradas: {', '.join(df_prep.columns)}")
             return pd.DataFrame()
         
-        # Garante que Quantidade seja numérica
         df_prep['Quantidade'] = pd.to_numeric(df_prep['Quantidade'], errors='coerce').fillna(0).astype(int)
         
-        # Se Total Venda não existir, cria com valor padrão
         if 'Total Venda' not in df_prep.columns:
             st.warning("⚠️ Coluna 'Total Venda' não encontrada. Usando valor estimado.")
             df_prep['Total Venda'] = df_prep['Quantidade'] * 50.0
         else:
             df_prep['Total Venda'] = pd.to_numeric(df_prep['Total Venda'], errors='coerce').fillna(0.0)
         
-        # Preenche colunas financeiras faltantes
         colunas_financeiras = {
             'Tipo': 'Venda',
             'Custo Produto': 0.0,
@@ -297,7 +290,6 @@ def preparar_dados_para_salvar(df_raw, canal, cnpj, data_venda):
             if col not in df_prep.columns:
                 df_prep[col] = valor_padrao
         
-        # Garante ordem das colunas conforme esperado
         df_final = pd.DataFrame()
         for col in COLUNAS_ESPERADAS:
             if col in df_prep.columns:
@@ -305,7 +297,6 @@ def preparar_dados_para_salvar(df_raw, canal, cnpj, data_venda):
             else:
                 df_final[col] = ""
         
-        # Validação final
         if df_final.empty:
             st.error("❌ Nenhum dado válido após processamento!")
             return pd.DataFrame()
@@ -319,27 +310,58 @@ def preparar_dados_para_salvar(df_raw, canal, cnpj, data_venda):
         return pd.DataFrame()
 
 # ==============================================================================
-# CARREGAMENTO DE DADOS
+# CARREGAMENTO DE DADOS (CORRIGIDO E ROBUSTO)
 # ==============================================================================
 @st.cache_data(ttl=300)
 def carregar_dados_historicos():
+    """
+    Carrega dados históricos e LIMPA/CONVERTE todas as colunas corretamente.
+    """
     try:
         r = requests.get(BCG_SHEETS_URL, timeout=15)
         r.raise_for_status()
         df = pd.read_csv(StringIO(r.text))
         
-        if 'Total Venda' in df.columns:
-            df['Total Venda'] = df['Total Venda'].apply(clean_currency)
+        # LIMPEZA ROBUSTA DE COLUNAS FINANCEIRAS
+        colunas_monetarias = [
+            'Total Venda', 'Custo Produto', 'Impostos', 'Comissão',
+            'Taxas Fixas', 'Embalagem', 'Investimento Ads', 
+            'Custo Total', 'Lucro Bruto'
+        ]
+        
+        for col in colunas_monetarias:
+            if col in df.columns:
+                # Remove R$, espaços, converte vírgula para ponto
+                df[col] = df[col].astype(str).str.replace('R$', '', regex=False)
+                df[col] = df[col].str.replace(' ', '', regex=False)
+                df[col] = df[col].str.replace('.', '', regex=False)  # Remove separador de milhares
+                df[col] = df[col].str.replace(',', '.', regex=False)  # Vírgula vira ponto decimal
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+        
+        # LIMPEZA DE QUANTIDADE
         if 'Quantidade' in df.columns:
+            df['Quantidade'] = df['Quantidade'].astype(str).str.replace(',', '.', regex=False)
             df['Quantidade'] = pd.to_numeric(df['Quantidade'], errors='coerce').fillna(0).astype(int)
+        
+        # LIMPEZA DE MARGEM (%)
         if 'Margem (%)' in df.columns:
-            df['Margem (%)'] = df['Margem (%)'].apply(clean_percent_read)
-        if 'Lucro Bruto' in df.columns:
-            df['Lucro Bruto'] = df['Lucro Bruto'].apply(clean_currency)
-            
+            df['Margem (%)'] = df['Margem (%)'].astype(str).str.replace('%', '', regex=False)
+            df['Margem (%)'] = df['Margem (%)'].str.replace(',', '.', regex=False)
+            df['Margem (%)'] = pd.to_numeric(df['Margem (%)'], errors='coerce').fillna(0.0)
+            # Converte para decimal (ex: 41.93% vira 0.4193)
+            df['Margem (%)'] = df['Margem (%)'] / 100
+        
+        # REMOVE LINHAS VAZIAS OU INVÁLIDAS
+        df = df[df['Produto'].notna()]
+        df = df[df['Produto'] != '']
+        df = df[df['Quantidade'] > 0]
+        
         return df
+        
     except Exception as e:
-        st.error(f"Erro ao carregar dados históricos: {e}")
+        st.error(f"❌ Erro ao carregar dados históricos: {e}")
+        import traceback
+        st.error(traceback.format_exc())
         return pd.DataFrame()
 
 # ==============================================================================
@@ -380,9 +402,9 @@ if 'processed_data' not in st.session_state:
         df_historico = carregar_dados_historicos()
         if not df_historico.empty:
             st.session_state.processed_data = df_historico
-            st.toast("Dados históricos carregados com sucesso!", icon="✅")
+            st.toast(f"✅ {len(df_historico)} registros carregados!", icon="✅")
         else:
-            st.toast("Nenhum dado histórico encontrado.", icon="⚠️")
+            st.toast("⚠️ Nenhum dado histórico encontrado.", icon="⚠️")
 
 if 'processed_data' in st.session_state:
     st.sidebar.info(f"📊 Registros Carregados: {len(st.session_state.processed_data)}")
@@ -402,7 +424,7 @@ data_venda = st.sidebar.date_input("Data", datetime.now())
 uploaded_file = st.sidebar.file_uploader("Arquivo Excel", type=["xlsx", "xls"])
 
 # ==============================================================================
-# PROCESSAMENTO DE UPLOAD (CORRIGIDO)
+# PROCESSAMENTO DE UPLOAD
 # ==============================================================================
 if uploaded_file:
     try:
@@ -501,16 +523,20 @@ tabs = st.tabs([
 if 'processed_data' in st.session_state:
     df_vendas = st.session_state.processed_data
     
+    # CÁLCULOS CORRIGIDOS
     if 'Total Venda' in df_vendas.columns:
         total_vendas = df_vendas['Total Venda'].sum()
     else:
-        total_vendas = (df_vendas['Quantidade'] * 50).sum()
+        total_vendas = 0.0
         
     ticket_medio = total_vendas / len(df_vendas) if len(df_vendas) > 0 else 0
     
     margem_media = 0
     if 'Margem (%)' in df_vendas.columns:
-        margem_media = df_vendas['Margem (%)'].mean()
+        # Filtra apenas valores válidos (não zero)
+        margens_validas = df_vendas[df_vendas['Margem (%)'] > 0]['Margem (%)']
+        if len(margens_validas) > 0:
+            margem_media = margens_validas.mean()
     
     with tabs[0]:
         c1, c2, c3 = st.columns(3)
@@ -520,7 +546,8 @@ if 'processed_data' in st.session_state:
         
         if 'Canal' in df_vendas.columns:
             st.subheader("Vendas por Canal")
-            st.bar_chart(df_vendas.groupby('Canal')['Quantidade'].sum())
+            vendas_canal = df_vendas.groupby('Canal')['Quantidade'].sum().sort_values(ascending=False)
+            st.bar_chart(vendas_canal)
 
     with tabs[1]:
         if 'CNPJ' in df_vendas.columns:
@@ -543,19 +570,26 @@ if 'processed_data' in st.session_state:
                 'Total Venda': 'sum'
             }).reset_index()
             
-            med_qtd = df_bcg['Quantidade'].median()
-            med_margem = df_bcg['Margem (%)'].median()
+            # Remove produtos sem dados válidos
+            df_bcg = df_bcg[df_bcg['Quantidade'] > 0]
+            df_bcg = df_bcg[df_bcg['Total Venda'] > 0]
             
-            def classificar_bcg(row):
-                if row['Quantidade'] >= med_qtd and row['Margem (%)'] >= med_margem: return 'Estrela ⭐'
-                if row['Quantidade'] >= med_qtd and row['Margem (%)'] < med_margem: return 'Vaca Leiteira 🐄'
-                if row['Quantidade'] < med_qtd and row['Margem (%)'] >= med_margem: return 'Interrogação ❓'
-                return 'Abacaxi 🍍'
-            
-            df_bcg['Classificação'] = df_bcg.apply(classificar_bcg, axis=1)
-            
-            st.scatter_chart(df_bcg, x='Margem (%)', y='Quantidade', color='Classificação', size='Total Venda')
-            st.dataframe(df_bcg, use_container_width=True)
+            if not df_bcg.empty:
+                med_qtd = df_bcg['Quantidade'].median()
+                med_margem = df_bcg['Margem (%)'].median()
+                
+                def classificar_bcg(row):
+                    if row['Quantidade'] >= med_qtd and row['Margem (%)'] >= med_margem: return 'Estrela ⭐'
+                    if row['Quantidade'] >= med_qtd and row['Margem (%)'] < med_margem: return 'Vaca Leiteira 🐄'
+                    if row['Quantidade'] < med_qtd and row['Margem (%)'] >= med_margem: return 'Interrogação ❓'
+                    return 'Abacaxi 🍍'
+                
+                df_bcg['Classificação'] = df_bcg.apply(classificar_bcg, axis=1)
+                
+                st.scatter_chart(df_bcg, x='Margem (%)', y='Quantidade', color='Classificação', size='Total Venda')
+                st.dataframe(df_bcg, use_container_width=True)
+            else:
+                st.warning("Dados insuficientes para análise BCG.")
         else:
             st.info("Dados insuficientes para BCG.")
 
@@ -572,19 +606,24 @@ if 'processed_data' in st.session_state:
                     'Total Venda': 'sum'
                 }).reset_index()
                 
-                med_qtd_c = df_bcg_canal['Quantidade'].median()
-                med_margem_c = df_bcg_canal['Margem (%)'].median()
+                df_bcg_canal = df_bcg_canal[df_bcg_canal['Quantidade'] > 0]
                 
-                def classificar_bcg_canal(row):
-                    if row['Quantidade'] >= med_qtd_c and row['Margem (%)'] >= med_margem_c: return 'Estrela ⭐'
-                    if row['Quantidade'] >= med_qtd_c and row['Margem (%)'] < med_margem_c: return 'Vaca Leiteira 🐄'
-                    if row['Quantidade'] < med_qtd_c and row['Margem (%)'] >= med_margem_c: return 'Interrogação ❓'
-                    return 'Abacaxi 🍍'
-                
-                df_bcg_canal['Classificação'] = df_bcg_canal.apply(classificar_bcg_canal, axis=1)
-                
-                st.scatter_chart(df_bcg_canal, x='Margem (%)', y='Quantidade', color='Classificação', size='Total Venda')
-                st.dataframe(df_bcg_canal, use_container_width=True)
+                if not df_bcg_canal.empty:
+                    med_qtd_c = df_bcg_canal['Quantidade'].median()
+                    med_margem_c = df_bcg_canal['Margem (%)'].median()
+                    
+                    def classificar_bcg_canal(row):
+                        if row['Quantidade'] >= med_qtd_c and row['Margem (%)'] >= med_margem_c: return 'Estrela ⭐'
+                        if row['Quantidade'] >= med_qtd_c and row['Margem (%)'] < med_margem_c: return 'Vaca Leiteira 🐄'
+                        if row['Quantidade'] < med_qtd_c and row['Margem (%)'] >= med_margem_c: return 'Interrogação ❓'
+                        return 'Abacaxi 🍍'
+                    
+                    df_bcg_canal['Classificação'] = df_bcg_canal.apply(classificar_bcg_canal, axis=1)
+                    
+                    st.scatter_chart(df_bcg_canal, x='Margem (%)', y='Quantidade', color='Classificação', size='Total Venda')
+                    st.dataframe(df_bcg_canal, use_container_width=True)
+                else:
+                    st.warning("Sem dados válidos para este canal.")
             else:
                 st.warning("Sem dados suficientes.")
         else:
@@ -593,7 +632,7 @@ if 'processed_data' in st.session_state:
     with tabs[4]:
         st.subheader("Análise de Preços")
         if 'Total Venda' in df_vendas.columns and 'Quantidade' in df_vendas.columns:
-            df_vendas['Preço Médio'] = df_vendas['Total Venda'] / df_vendas['Quantidade']
+            df_vendas['Preço Médio'] = df_vendas['Total Venda'] / df_vendas['Quantidade'].replace(0, 1)
             st.scatter_chart(df_vendas, x='Quantidade', y='Preço Médio')
         else:
             st.info("Dados de preço indisponíveis.")
@@ -619,18 +658,23 @@ if 'processed_data' in st.session_state:
                 'Total Venda': 'sum'
             }).reset_index()
             
-            med_qtd_o = df_bcg_oport['Quantidade'].median()
-            med_margem_o = df_bcg_oport['Margem (%)'].median()
+            df_bcg_oport = df_bcg_oport[df_bcg_oport['Quantidade'] > 0]
             
-            def classificar_bcg_oport(row):
-                if row['Quantidade'] >= med_qtd_o and row['Margem (%)'] >= med_margem_o: return 'Estrela ⭐'
-                if row['Quantidade'] >= med_qtd_o and row['Margem (%)'] < med_margem_o: return 'Vaca Leiteira 🐄'
-                if row['Quantidade'] < med_qtd_o and row['Margem (%)'] >= med_margem_o: return 'Interrogação ❓'
-                return 'Abacaxi 🍍'
-            
-            df_bcg_oport['Classificação'] = df_bcg_oport.apply(classificar_bcg_oport, axis=1)
-            oportunidades = df_bcg_oport[df_bcg_oport['Classificação'] == 'Interrogação ❓'].sort_values('Margem (%)', ascending=False)
-            st.dataframe(oportunidades, use_container_width=True)
+            if not df_bcg_oport.empty:
+                med_qtd_o = df_bcg_oport['Quantidade'].median()
+                med_margem_o = df_bcg_oport['Margem (%)'].median()
+                
+                def classificar_bcg_oport(row):
+                    if row['Quantidade'] >= med_qtd_o and row['Margem (%)'] >= med_margem_o: return 'Estrela ⭐'
+                    if row['Quantidade'] >= med_qtd_o and row['Margem (%)'] < med_margem_o: return 'Vaca Leiteira 🐄'
+                    if row['Quantidade'] < med_qtd_o and row['Margem (%)'] >= med_margem_o: return 'Interrogação ❓'
+                    return 'Abacaxi 🍍'
+                
+                df_bcg_oport['Classificação'] = df_bcg_oport.apply(classificar_bcg_oport, axis=1)
+                oportunidades = df_bcg_oport[df_bcg_oport['Classificação'] == 'Interrogação ❓'].sort_values('Margem (%)', ascending=False)
+                st.dataframe(oportunidades, use_container_width=True)
+            else:
+                st.info("Sem dados para análise.")
         else:
             st.info("Classificação BCG não disponível.")
 
