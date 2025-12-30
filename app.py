@@ -74,7 +74,7 @@ def clean_currency(val):
     if isinstance(val, (int, float)):
         return float(val)
     val = str(val).strip()
-    val = val.replace('R$', '').replace(' ', '')
+    val = val.replace('R$', '').replace(' ', '').replace('\xa0', '')
     val = val.replace('.', '')  # Remove separador de milhar
     val = val.replace(',', '.')  # Vírgula vira ponto
     try:
@@ -454,8 +454,8 @@ def get_status_meta(valor, minimo, ideal, inverso=False):
 # INTERFACE PRINCIPAL
 # ============================================
 def main():
-    st.title("📊 Sales BI Pro - V55")
-    st.caption("Análise Integrada de Vendas | Todas as Abas Conectadas")
+    st.title("📊 Sales BI Pro - V56")
+    st.caption("✅ Integração Completa | Dados Reais da Planilha")
     
     # ============================================
     # SIDEBAR - DIAGNÓSTICO E IMPORTAÇÃO
@@ -662,28 +662,29 @@ def main():
     # Carregar metas
     metas = carregar_metas()
     
-    # Carregar dados do DASHBOARD GERAL (NÃO Detalhes_Canais)
-    with st.spinner("📊 Carregando dados do Dashboard Geral..."):
-        df_geral = carregar_aba('dashboard_geral')
+    # Carregar dados EXECUTIVA SIMPLES (dados processados por produto)
+    with st.spinner("📊 Carregando dados processados..."):
+        df_executiva = carregar_aba('executiva_simples')
     
-    if df_geral.empty:
-        st.warning("⚠️ Nenhum dado encontrado no Dashboard Geral")
-        st.info("💡 **Dica:** Verifique se a planilha tem dados processados ou faça upload de vendas")
+    if df_executiva.empty:
+        st.warning("⚠️ Nenhum dado encontrado na aba Executiva Simples")
+        st.info("💡 **Dica:** Faça upload de vendas ou verifique a planilha")
         return
     
-    st.success(f"✅ {len(df_geral)} registros carregados do Dashboard Geral")
+    st.success(f"✅ {len(df_executiva)} produtos carregados")
     
     # MÉTRICAS PRINCIPAIS
     st.header("📈 Métricas Principais")
     
     # Calcular métricas
-    total_vendas = df_geral['Total Venda'].sum() if 'Total Venda' in df_geral.columns else 0
-    total_lucro = df_geral['Lucro Bruto'].sum() if 'Lucro Bruto' in df_geral.columns else 0
+    total_vendas = df_executiva['Total Venda'].sum() if 'Total Venda' in df_executiva.columns else 0
+    total_lucro = df_executiva['Lucro Bruto'].sum() if 'Lucro Bruto' in df_executiva.columns else 0
+    total_qtd = df_executiva['Quantidade'].sum() if 'Quantidade' in df_executiva.columns else 0
     margem_media = (total_lucro / total_vendas) if total_vendas > 0 else 0
-    ticket_medio = total_vendas / len(df_geral) if len(df_geral) > 0 else 0
+    ticket_medio = total_vendas / len(df_executiva) if len(df_executiva) > 0 else 0
     
     # Exibir métricas
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
         st.metric(
@@ -698,13 +699,19 @@ def main():
         )
     
     with col3:
+        st.metric(
+            "📦 Quantidade",
+            f"{total_qtd:,.0f}"
+        )
+    
+    with col4:
         status_margem = get_status_meta(margem_media, metas['margem_minima'], metas['margem_ideal'])
         st.metric(
             f"{status_margem} Margem Média",
             format_percent_br(margem_media)
         )
     
-    with col4:
+    with col5:
         status_ticket = get_status_meta(ticket_medio, metas['ticket_minimo'], metas['ticket_ideal'])
         st.metric(
             f"{status_ticket} Ticket Médio",
@@ -713,57 +720,36 @@ def main():
     
     # ABAS DO DASHBOARD
     tabs = st.tabs([
-        "📊 Dashboard Geral",
-        "🏢 Resultado CNPJ",
+        "📊 Top Produtos",
         "🎯 BCG por Canal",
         "💲 Preços MKTP",
         "🔄 Giro SKU",
-        "💡 Oportunidades"
+        "💡 Oportunidades",
+        "📋 Todos os Dados"
     ])
     
-    # TAB 1: Dashboard Geral
+    # TAB 1: Top Produtos
     with tabs[0]:
-        st.subheader("📊 Visão Geral por Canal")
+        st.subheader("🏆 Top 20 Produtos")
         
-        if 'Canal' in df_geral.columns:
-            # Vendas por canal
-            vendas_canal = df_geral.groupby('Canal').agg({
-                'Total Venda': 'sum',
-                'Lucro Bruto': 'sum',
-                'Quantidade': 'sum'
-            }).reset_index()
-            
-            vendas_canal['Margem (%)'] = vendas_canal['Lucro Bruto'] / vendas_canal['Total Venda']
-            vendas_canal = vendas_canal.sort_values('Total Venda', ascending=False)
-            
-            # Gráfico
-            st.bar_chart(vendas_canal.set_index('Canal')['Total Venda'])
-            
-            # Tabela
-            st.dataframe(
-                vendas_canal.style.format({
-                    'Total Venda': format_currency_br,
-                    'Lucro Bruto': format_currency_br,
-                    'Margem (%)': format_percent_br,
-                    'Quantidade': '{:,.0f}'
-                }),
-                use_container_width=True
-            )
-        else:
-            st.dataframe(df_geral.head(20), use_container_width=True)
+        top20 = df_executiva.nlargest(20, 'Quantidade')
+        
+        # Gráfico
+        st.bar_chart(top20.set_index('Produto')['Quantidade'])
+        
+        # Tabela
+        st.dataframe(
+            top20[[' Produto', 'Quantidade', 'Total Venda', 'Lucro Bruto', 'Margem (%)']].style.format({
+                'Total Venda': format_currency_br,
+                'Lucro Bruto': format_currency_br,
+                'Margem (%)': format_percent_br,
+                'Quantidade': '{:,.0f}'
+            }),
+            use_container_width=True
+        )
     
-    # TAB 2: Resultado CNPJ
+    # TAB 2: BCG por Canal
     with tabs[1]:
-        st.subheader("🏢 Resultado por CNPJ")
-        df_cnpj = carregar_aba('resultado_cnpj')
-        
-        if not df_cnpj.empty:
-            st.dataframe(df_cnpj, use_container_width=True)
-        else:
-            st.info("📭 Nenhum dado disponível")
-    
-    # TAB 3: BCG por Canal
-    with tabs[2]:
         st.subheader("🎯 Matriz BCG por Canal")
         df_bcg = carregar_aba('bcg_canal_mkt')
         
@@ -772,8 +758,8 @@ def main():
         else:
             st.info("📭 Nenhum dado disponível")
     
-    # TAB 4: Preços MKTP
-    with tabs[3]:
+    # TAB 3: Preços MKTP
+    with tabs[2]:
         st.subheader("💲 Análise de Preços Marketplace")
         df_precos = carregar_aba('precos_simples_mktp')
         
@@ -782,23 +768,18 @@ def main():
         else:
             st.info("📭 Nenhum dado disponível")
     
-    # TAB 5: Giro SKU
-    with tabs[4]:
+    # TAB 4: Giro SKU
+    with tabs[3]:
         st.subheader("🔄 Giro de Produtos (SKU)")
         df_giro = carregar_aba('vendas_sku_geral')
         
         if not df_giro.empty:
-            # Top 20
-            st.subheader("🏆 Top 20 Produtos")
-            top20 = df_giro.nlargest(20, 'Quantidade') if 'Quantidade' in df_giro.columns else df_giro.head(20)
-            st.bar_chart(top20.set_index('Produto')['Quantidade'] if 'Produto' in df_giro.columns else top20)
-            
             st.dataframe(df_giro, use_container_width=True)
         else:
             st.info("📭 Nenhum dado disponível")
     
-    # TAB 6: Oportunidades
-    with tabs[5]:
+    # TAB 5: Oportunidades
+    with tabs[4]:
         st.subheader("💡 Oportunidades de Melhoria")
         df_oport = carregar_aba('oportunidades_canais_mkt')
         
@@ -807,9 +788,23 @@ def main():
         else:
             st.info("📭 Nenhum dado disponível")
     
+    # TAB 6: Todos os Dados
+    with tabs[5]:
+        st.subheader("📋 Tabela Completa - Executiva Simples")
+        st.dataframe(df_executiva, use_container_width=True)
+        
+        # Botão de download
+        excel_data = to_excel(df_executiva)
+        st.download_button(
+            label="📥 Baixar Excel",
+            data=excel_data,
+            file_name=f"executiva_simples_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    
     # RODAPÉ
     st.divider()
-    st.caption("📊 Sales BI Pro V55 | Integração Completa Google Sheets")
+    st.caption("📊 Sales BI Pro V56 | ✅ Lendo Dados Reais da Planilha")
 
 if __name__ == "__main__":
     main()
