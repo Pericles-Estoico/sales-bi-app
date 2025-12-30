@@ -255,7 +255,9 @@ if 'processed_data' in st.session_state:
         
         if 'Canal' in df_vendas.columns:
             st.subheader("Vendas por Canal")
-            st.bar_chart(df_vendas.groupby('Canal')['Quantidade'].sum())
+            df_canal_vendas = df_vendas.groupby('Canal')['Quantidade'].sum().reset_index()
+            df_canal_vendas.columns = ['Canal', 'Total Vendido']
+            st.dataframe(df_canal_vendas, use_container_width=True)
 
     with tabs[1]: # Por CNPJ
         if 'CNPJ' in df_vendas.columns:
@@ -291,16 +293,9 @@ if 'processed_data' in st.session_state:
             
             df_bcg['Classificação'] = df_bcg.apply(classificar_bcg, axis=1)
             
-            # Gráfico Nativo Simples
-            st.scatter_chart(
-                df_bcg,
-                x='Margem (%)',
-                y='Quantidade',
-                color='Classificação',
-                size='Total Venda'
-            )
-            
-            st.dataframe(df_bcg, use_container_width=True)
+            # Tabela BCG ordenada
+            df_bcg_sorted = df_bcg.sort_values('Total Venda', ascending=False)
+            st.dataframe(df_bcg_sorted, use_container_width=True, height=500)
         else:
             st.info("Dados insuficientes para BCG (precisa de Quantidade e Margem).")
 
@@ -329,14 +324,9 @@ if 'processed_data' in st.session_state:
                 
                 df_bcg_canal['Classificação'] = df_bcg_canal.apply(classificar_bcg_canal, axis=1)
                 
-                st.scatter_chart(
-                    df_bcg_canal,
-                    x='Margem (%)',
-                    y='Quantidade',
-                    color='Classificação',
-                    size='Total Venda'
-                )
-                st.dataframe(df_bcg_canal, use_container_width=True)
+                # Tabela BCG por Canal ordenada
+                df_bcg_canal_sorted = df_bcg_canal.sort_values('Total Venda', ascending=False)
+                st.dataframe(df_bcg_canal_sorted, use_container_width=True, height=500)
             else:
                 st.warning("Sem dados para este canal.")
         else:
@@ -345,8 +335,13 @@ if 'processed_data' in st.session_state:
     with tabs[4]: # Preços
         st.subheader("Análise de Preços")
         if 'Total Venda' in df_vendas.columns and 'Quantidade' in df_vendas.columns:
-            df_vendas['Preço Médio'] = df_vendas['Total Venda'] / df_vendas['Quantidade']
-            st.scatter_chart(df_vendas, x='Quantidade', y='Preço Médio')
+            df_precos = df_vendas.groupby('Produto').agg({
+                'Total Venda': 'sum',
+                'Quantidade': 'sum'
+            }).reset_index()
+            df_precos['Preço Médio'] = df_precos['Total Venda'] / df_precos['Quantidade']
+            df_precos_sorted = df_precos.sort_values('Preço Médio', ascending=False)
+            st.dataframe(df_precos_sorted, use_container_width=True, height=500)
         else:
             st.info("Dados de preço indisponíveis.")
 
@@ -357,8 +352,10 @@ if 'processed_data' in st.session_state:
     with tabs[6]: # Giro
         st.subheader("Giro de Produtos")
         if 'Quantidade' in df_vendas.columns:
-            top_giro = df_vendas.groupby('Produto')['Quantidade'].sum().sort_values(ascending=False).head(20)
-            st.bar_chart(top_giro)
+            df_giro = df_vendas.groupby('Produto')['Quantidade'].sum().reset_index()
+            df_giro.columns = ['Produto', 'Total Vendido']
+            df_giro_sorted = df_giro.sort_values('Total Vendido', ascending=False).head(50)
+            st.dataframe(df_giro_sorted, use_container_width=True, height=500)
         else:
             st.info("Dados de quantidade indisponíveis.")
 
