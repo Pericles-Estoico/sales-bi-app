@@ -1,9 +1,7 @@
-streamlit==1.31.0
-pandas==2.1.4
-gspread==5.12.4
-google-auth==2.27.0
-google-auth-oauthlib==1.2.0
-google-auth-httplib2==0.2.0
-requests==2.31.0
-openpyxl==3.1.2
-xlsxwriter==3.1.9
+streamlit>=1.28.0
+pandas>=2.2.0
+gspread>=5.12.0
+google-auth>=2.27.0
+requests>=2.31.0
+openpyxl>=3.1.0
+xlsxwriter>=3.1.0
