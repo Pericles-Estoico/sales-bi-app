@@ -1,568 +1,465 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-import json
-import unicodedata
-import io
-import time
-import requests
-import math
-from io import StringIO
-import xlsxwriter
+from datetime import datetime, timedelta
 import plotly.express as px
-from modules.sheets_reader import SheetsReader
+import plotly.graph_objects as go
+from modules.bcg_analysis import BCGAnalysis
+from modules.pareto_analysis import ParetoAnalysis
+from modules.stock_projection import StockProjection
+from utils.data_processor import DataProcessor
+import os
+import json
 
-# ==============================================================================
-# VERSÃO V56 - INTEGRAÇÃO COM GESTÃO DE ESTOQUE
-# ==============================================================================
-# 1. Adiciona integração com planilha template_estoque
-# 2. Nova aba "Gestão de Estoque" com análise de ruptura
-# 3. Detecta produtos faltantes (BCG → template_estoque)
-# 4. Exporta Excel formatado para upload manual
-# 5. Normalização automática de separadores decimais
-# ==============================================================================
+# Configuração da página
+st.set_page_config(
+    page_title="Sales BI Analytics",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-st.set_page_config(page_title="Sales BI Pro", page_icon="📊", layout="wide")
+# CSS customizado
+st.markdown("""
+<style>
+    .main {padding: 0rem 1rem;}
+    .stMetric {
+        background-color: #f0f2f6;
+        padding: 15px;
+        border-radius: 10px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .upload-card {
+        background: white;
+        padding: 20px;
+        border-radius: 10px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        margin-bottom: 15px;
+    }
+    .channel-badge {
+        display: inline-block;
+        padding: 5px 12px;
+        border-radius: 15px;
+        font-size: 12px;
+        font-weight: 600;
+        margin: 3px;
+    }
+    .badge-ml {background: #FFE600; color: #333;}
+    .badge-shopee {background: #EE4D2D; color: white;}
+    .badge-shein {background: #000; color: white;}
+    .badge-geral {background: #1f77b4; color: white;}
+</style>
+""", unsafe_allow_html=True)
 
-# ==============================================================================
-# CONFIGURAÇÕES DE GOOGLE SHEETS
-# ==============================================================================
-SPREADSHEET_ID = "1qoUk6AsNXLpHyzRrZplM4F5573zN9hUwQTNVUF3UC8E"
-BASE_URL = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/export?format=csv"
+# Inicializar session state
+if 'historical_data' not in st.session_state:
+    st.session_state.historical_data = pd.DataFrame()
+if 'channel_data' not in st.session_state:
+    st.session_state.channel_data = {}
 
-# Mapeamento: tipo → (GID, Nome da Aba)
-SHEET_MAPPING = {
-    'produtos': (1037607798, 'Produtos'),
-    'kits': (1569485799, 'Kits'),
-    'custos_pedido': (1720329296, 'Custos por Pedido'),
-    'canais': (1639432432, 'Canais'),
-    'impostos': (260097325, 'Impostos'),
-    'frete': (1928835495, 'Frete'),
-    'metas': (1477190272, 'Metas'),
-    'dashboard': (749174572, '1. Dashboard Geral'),
-    'detalhes': (961459380, '6. Detalhes'),
-    'cnpj': (1218055125, '2. Análise por CNPJ'),
-    'executiva': (175434857, '3. Análise Executiva'),
-    'precos': (1141986740, '4. Preços Marketplaces'),
-    'bcg': (1589145111, '5. Matriz BCG'),
-    'giro': (364031804, '7. Giro de Produtos'),
-    'oportunidades': (563501913, '8. Oportunidades')
-}
-
-# URLs para fallback CSV (mantido para compatibilidade)
-URLS = {k: f"{BASE_URL}&gid={v[0]}" for k, v in SHEET_MAPPING.items()}
-
-# ==============================================================================
-# CONSTANTES E MAPEAMENTOS
-# ==============================================================================
+# Canais disponíveis
 CHANNELS = {
-    'geral': '📊 Vendas Gerais',
-    'mercado_livre': '🛒 Mercado Livre',
-    'shopee_matriz': '🛍️ Shopee Matriz',
-    'shopee_150': '🏪 Shopee 1:50',
-    'shein': '👗 Shein'
+    'geral': {'name': 'Vendas Gerais', 'color': '#1f77b4', 'icon': '📊'},
+    'mercado_livre': {'name': 'Mercado Livre', 'color': '#FFE600', 'icon': '🛒'},
+    'shopee_matriz': {'name': 'Shopee Matriz', 'color': '#EE4D2D', 'icon': '🛍️'},
+    'shopee_150': {'name': 'Shopee 1:50', 'color': '#FF6B35', 'icon': '🏪'},
+    'shein': {'name': 'Shein', 'color': '#000000', 'icon': '👗'}
 }
 
-ORDEM_BCG = ['Vaca Leiteira 🐄', 'Estrela ⭐', 'Interrogação ❓', 'Abacaxi 🍍']
-
-# ==============================================================================
-# FUNÇÕES UTILITÁRIAS
-# ==============================================================================
-def clean_currency(value):
-    if pd.isna(value) or value == '': return 0.0
-    s_val = str(value).strip().replace('R$', '').replace(' ', '').replace('%', '')
-    try: return float(s_val)
-    except: pass
-    if ',' in s_val and '.' in s_val: s_val = s_val.replace('.', '').replace(',', '.')
-    elif ',' in s_val: s_val = s_val.replace(',', '.')
-    try: return float(s_val)
-    except: return 0.0
-
-def clean_percent_read(value):
-    if pd.isna(value) or value == '': return 0.0
-    s_val = str(value).strip().replace('%', '').replace(' ', '')
-    if ',' in s_val: s_val = s_val.replace('.', '').replace(',', '.')
-    try: return float(s_val) / 100
-    except: return 0.0
-
-def clean_float(value):
-    if pd.isna(value) or value == '': return 0.0
-    s_val = str(value).strip().replace(',', '.')
-    try: return float(s_val)
-    except: return 0.0
-
-def format_currency_br(value):
-    try: return f"R$ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except: return "R$ 0,00"
-
-def format_percent_br(value):
-    try: return f"{value * 100:.2f}%".replace(".", ",")
-    except: return "0,00%"
-
-def normalizar(texto):
-    if pd.isna(texto): return ''
-    texto = str(texto)
-    texto = unicodedata.normalize('NFD', texto)
-    texto = ''.join(c for c in texto if unicodedata.category(c) != 'Mn')
-    return texto.lower().strip()
-
-# ==============================================================================
-# INICIALIZAÇÃO DO LEITOR DE SHEETS
-# ==============================================================================
-@st.cache_resource
-def get_sheets_reader():
-    """Inicializa o leitor de Google Sheets (cached)"""
-    return SheetsReader(SPREADSHEET_ID)
-
-# ==============================================================================
-# FUNÇÃO DE CARREGAMENTO DE DADOS (CACHEADA)
-# ==============================================================================
-@st.cache_data(ttl=300)
-def carregar_dados(tipo):
-    """
-    Carrega dados de uma aba do Google Sheets
-    Tenta usar Google Sheets API primeiro, cai de volta para CSV export
-    """
-    if tipo not in SHEET_MAPPING:
-        return pd.DataFrame()
+# Sidebar
+with st.sidebar:
+    st.image("https://via.placeholder.com/200x80/1f77b4/ffffff?text=Sales+BI", use_column_width=True)
+    st.title("📊 Sales BI Analytics")
+    st.markdown("---")
     
-    gid, sheet_name = SHEET_MAPPING[tipo]
+    # Seleção de tipo de upload
+    st.subheader("📁 Upload de Vendas")
     
-    try:
-        # Usa o leitor inteligente
-        reader = get_sheets_reader()
-        df = reader.read_sheet_by_gid(gid, sheet_name)
-        
-        if df.empty:
-            return df
-        
-        # Limpeza Genérica
-        for col in df.columns:
-            if 'Total' in col or 'Venda' in col or 'Lucro' in col or 'Preço' in col:
-                if df[col].dtype == 'object':
-                    df[col] = df[col].apply(clean_currency)
-            if 'Margem' in col or '%' in col:
-                if df[col].dtype == 'object':
-                    df[col] = df[col].apply(clean_percent_read)
-            if 'Quantidade' in col:
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
-                
-        return df
-        
-    except Exception as e:
-        st.error(f"Erro ao carregar dados de {tipo}: {e}")
-        return pd.DataFrame()
-
-# ==============================================================================
-# INTERFACE PRINCIPAL
-# ==============================================================================
-st.sidebar.title("🔧 Status da Conexão")
-
-# Mostra status do leitor
-try:
-    reader = get_sheets_reader()
-    status = reader.get_status()
+    upload_type = st.radio(
+        "Tipo de Upload",
+        ["📊 Vendas Gerais", "🏪 Por Canal de Venda"],
+        help="Escolha entre upload geral ou por canal específico"
+    )
     
-    if status['realtime']:
-        st.sidebar.success(f"**{status['method']}**")
-        st.sidebar.info("✅ Dados em tempo real das abas originais")
-    else:
-        st.sidebar.warning(f"**{status['method']}**")
-        st.sidebar.warning("⚠️ Algumas abas podem não funcionar (fórmulas complexas)")
-        st.sidebar.info("💡 Configure Google Sheets API para acesso completo")
-except Exception as e:
-    st.sidebar.error(f"❌ Erro: {e}")
-
-# MODO SIMULAÇÃO (SANDBOX)
-if 'sandbox_mode' not in st.session_state:
-    st.session_state.sandbox_mode = False
-
-sandbox_toggle = st.sidebar.checkbox("🧪 MODO SIMULAÇÃO (Sandbox)", value=st.session_state.sandbox_mode, help="Ative para testar sem salvar dados reais.")
-if sandbox_toggle != st.session_state.sandbox_mode:
-    st.session_state.sandbox_mode = sandbox_toggle
-    st.rerun()
-
-if st.session_state.sandbox_mode:
-    st.sidebar.warning("⚠️ MODO SIMULAÇÃO ATIVO: Nenhuma alteração será salva!")
-
-# Carregamento Inicial
-with st.spinner("Conectando à planilha mestre..."):
-    df_dashboard = carregar_dados('dashboard')
-    if not df_dashboard.empty:
-        st.sidebar.success("Conectado: Config_BI_Final_MatrizBCG")
-    else:
-        st.sidebar.error("Falha na conexão com a planilha.")
-
-st.sidebar.divider()
-st.sidebar.header("📥 Importar Novas Vendas")
-
-if st.sidebar.button("🔄 Atualizar Dados (Limpar Cache)"):
-    st.cache_data.clear()
-    st.rerun()
-
-# Inputs de Upload (Mantidos para compatibilidade)
-formato = st.sidebar.radio("Formato", ["Bling", "Padrão"], index=0)
-canal = st.sidebar.selectbox("Canal", list(CHANNELS.keys()), format_func=lambda x: CHANNELS[x])
-cnpj = st.sidebar.selectbox("CNPJ/Regime", ["Simples Nacional", "Lucro Presumido"])
-data_venda = st.sidebar.date_input("Data", datetime.now())
-ads = st.sidebar.number_input("Ads (R$)", min_value=0.0, step=10.0)
-uploaded_file = st.sidebar.file_uploader("Arquivo Excel", type=["xlsx", "xls"])
-
-# ==============================================================================
-# DASHBOARD E VISUALIZAÇÃO
-# ==============================================================================
-st.title("📊 Sales BI Pro")
-
-tabs = st.tabs([
-    "📈 Visão Geral", "🏢 Por CNPJ", "⭐ BCG Geral", "🎯 BCG por Canal", 
-    "💲 Preços", "📝 Detalhes", "🔄 Giro de Produtos", "🚀 Oportunidades", "📦 Gestão de Estoque"
-])
-
-# 1. VISÃO GERAL
-with tabs[0]:
-    if not df_dashboard.empty:
-        total_vendas = df_dashboard['Total Venda'].sum()
-        margem_media = df_dashboard['Margem (%)'].mean()
-        qtd_total = df_dashboard['Quantidade'].sum()
-        ticket_medio = total_vendas / qtd_total if qtd_total > 0 else 0
-        
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Vendas Totais", format_currency_br(total_vendas))
-        c2.metric("Margem Média", format_percent_br(margem_media))
-        c3.metric("Ticket Médio", format_currency_br(ticket_medio))
-        
-        st.subheader("Vendas por Canal")
-        fig = px.bar(df_dashboard, x='Canal', y='Total Venda', color='Canal', text_auto='.2s', title="Faturamento por Canal")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Carregando dados do Dashboard...")
-
-# 2. POR CNPJ
-with tabs[1]:
-    df_cnpj = carregar_dados('cnpj')
-    if not df_cnpj.empty:
-        st.subheader("Análise por CNPJ")
-        st.dataframe(df_cnpj.style.format({'Total Venda': 'R$ {:,.2f}', 'Lucro Bruto': 'R$ {:,.2f}'}), use_container_width=True)
-        
-        fig = px.pie(df_cnpj, values='Total Venda', names='CNPJ', title='Distribuição de Vendas por CNPJ')
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Carregando dados de CNPJ...")
-
-# 3. BCG GERAL
-with tabs[2]:
-    df_bcg = carregar_dados('bcg')
-    if not df_bcg.empty:
-        st.subheader("Matriz BCG Geral")
-        
-        # Filtros
-        classificacoes = st.multiselect("Filtrar Classificação", df_bcg['Classificação'].unique(), default=df_bcg['Classificação'].unique())
-        df_bcg_filt = df_bcg[df_bcg['Classificação'].isin(classificacoes)]
-        
-        fig = px.scatter(
-            df_bcg_filt, 
-            x='Margem (%)', 
-            y='Quantidade', 
-            color='Classificação', 
-            size='Total Venda', 
-            hover_name='Produto',
-            title="Matriz BCG (Volume x Margem)",
-            color_discrete_map={
-                'Estrela ⭐': '#FFD700',
-                'Vaca Leiteira 🐄': '#C0C0C0',
-                'Interrogação ❓': '#1E90FF',
-                'Abacaxi 🍍': '#FF4500'
-            }
+    if upload_type == "📊 Vendas Gerais":
+        st.markdown("### Upload Geral")
+        uploaded_file = st.file_uploader(
+            "Planilha de vendas diárias",
+            type=['xlsx', 'xls', 'csv'],
+            key="upload_geral",
+            help="Upload da planilha consolidada de vendas"
         )
-        # Linhas de Corte (Médias)
-        med_qtd = df_bcg['Quantidade'].median()
-        med_margem = df_bcg['Margem (%)'].median()
-        fig.add_hline(y=med_qtd, line_dash="dash", line_color="gray", annotation_text="Média Qtd")
-        fig.add_vline(x=med_margem, line_dash="dash", line_color="gray", annotation_text="Média Margem")
         
-        st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(df_bcg_filt, use_container_width=True)
-    else:
-        st.info("Carregando dados da BCG...")
-
-# 4. BCG POR CANAL
-with tabs[3]:
-    st.subheader("BCG por Canal")
-    # Como a aba BCG já tem todos os produtos, podemos filtrar se houver coluna Canal, 
-    # mas a planilha BCG consolidada geralmente não tem canal linha a linha.
-    # Vamos usar a aba Detalhes para reconstruir se necessário, ou avisar.
-    st.info("Para análise detalhada por canal, utilize a aba 'Detalhes' e filtre pelo canal desejado.")
-
-# 5. PREÇOS
-with tabs[4]:
-    df_precos = carregar_dados('precos')
-    if not df_precos.empty:
-        st.subheader("Monitoramento de Preços")
-        st.dataframe(df_precos, use_container_width=True)
-    else:
-        st.info("Carregando dados de Preços...")
-
-# 6. DETALHES
-with tabs[5]:
-    df_detalhes = carregar_dados('detalhes')
-    if not df_detalhes.empty:
-        st.subheader("Base de Dados Completa")
-        st.dataframe(df_detalhes, use_container_width=True)
-    else:
-        st.info("Carregando detalhes...")
-
-# 7. GIRO
-with tabs[6]:
-    df_giro = carregar_dados('giro')
-    if not df_giro.empty:
-        st.subheader("Giro de Estoque")
-        st.dataframe(df_giro, use_container_width=True)
-    else:
-        st.info("Carregando dados de Giro...")
-
-# 8. OPORTUNIDADES
-with tabs[7]:
-    df_oportunidades = carregar_dados('oportunidades')
-    if not df_oportunidades.empty:
-        st.subheader("🚀 Oportunidades Identificadas")
-        st.dataframe(df_oportunidades, use_container_width=True)
-    else:
-        st.info("Carregando oportunidades...")
-
-# 9. GESTÃO DE ESTOQUE (NOVA)
-with tabs[8]:
-    st.subheader("📦 Gestão de Estoque")
+        if uploaded_file:
+            if st.button("🔄 Processar Vendas Gerais", use_container_width=True):
+                with st.spinner("Processando..."):
+                    processor = DataProcessor()
+                    daily_data = processor.load_data(uploaded_file)
+                    daily_data['Canal'] = 'Geral'
+                    daily_data['Data_Upload'] = datetime.now()
+                    
+                    # Adicionar ao histórico
+                    if not st.session_state.historical_data.empty:
+                        st.session_state.historical_data = pd.concat(
+                            [st.session_state.historical_data, daily_data],
+                            ignore_index=True
+                        )
+                    else:
+                        st.session_state.historical_data = daily_data
+                    
+                    st.success(f"✅ {len(daily_data)} registros processados!")
+                    st.balloons()
     
-    # Importar módulos (import local para evitar erro se módulos não existirem)
-    try:
-        from modules.inventory_integration import InventoryIntegration
-        from modules.rupture_analysis import RuptureAnalysis
-        
-        # Inicializar integração
-        inv_integration = InventoryIntegration()
-    except ImportError as e:
-        st.error(f"❌ Erro ao importar módulos de gestão de estoque: {e}")
-        st.info("💡 Aguarde alguns minutos para o Streamlit atualizar os arquivos do GitHub.")
-        st.stop()
-    
-    # Carregar dados de estoque
-    with st.spinner("Carregando dados de estoque..."):
-        df_estoque = inv_integration.carregar_estoque()
-    
-    if df_estoque.empty:
-        st.error("❌ Não foi possível carregar dados de estoque da planilha template_estoque")
     else:
-        # ==============================================================
-        # SEÇÃO 1: ESTATÍSTICAS GERAIS
-        # ==============================================================
-        st.markdown("### 📊 Visão Geral do Estoque")
+        st.markdown("### Upload por Canal")
         
-        stats = inv_integration.calcular_estatisticas_estoque(df_estoque)
+        selected_channel = st.selectbox(
+            "Selecione o Canal",
+            options=list(CHANNELS.keys()),
+            format_func=lambda x: f"{CHANNELS[x]['icon']} {CHANNELS[x]['name']}"
+        )
         
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total de Produtos", stats.get('total_produtos', 0))
-        col2.metric("Com Estoque", stats.get('produtos_com_estoque', 0), 
-                   delta=f"-{stats.get('produtos_sem_estoque', 0)} sem estoque",
-                   delta_color="inverse")
-        col3.metric("Abaixo do Mínimo", stats.get('produtos_abaixo_minimo', 0))
-        col4.metric("Valor em Estoque", format_currency_br(stats.get('valor_total_estoque', 0)))
+        st.markdown(f"""
+        <div style="background: {CHANNELS[selected_channel]['color']}; 
+                    padding: 10px; border-radius: 5px; color: white; text-align: center;">
+            <strong>{CHANNELS[selected_channel]['icon']} {CHANNELS[selected_channel]['name']}</strong>
+        </div>
+        """, unsafe_allow_html=True)
         
-        st.divider()
+        uploaded_file = st.file_uploader(
+            f"Planilha {CHANNELS[selected_channel]['name']}",
+            type=['xlsx', 'xls', 'csv'],
+            key=f"upload_{selected_channel}",
+            help=f"Upload de vendas do canal {CHANNELS[selected_channel]['name']}"
+        )
         
-        # ==============================================================
-        # SEÇÃO 2: ANÁLISE DE RUPTURA
-        # ==============================================================
-        st.markdown("### ⚠️ Análise de Ruptura")
+        if uploaded_file:
+            if st.button(f"🔄 Processar {CHANNELS[selected_channel]['name']}", use_container_width=True):
+                with st.spinner("Processando..."):
+                    processor = DataProcessor()
+                    daily_data = processor.load_data(uploaded_file)
+                    daily_data['Canal'] = CHANNELS[selected_channel]['name']
+                    daily_data['Canal_ID'] = selected_channel
+                    daily_data['Data_Upload'] = datetime.now()
+                    
+                    # Salvar por canal
+                    if selected_channel not in st.session_state.channel_data:
+                        st.session_state.channel_data[selected_channel] = daily_data
+                    else:
+                        st.session_state.channel_data[selected_channel] = pd.concat(
+                            [st.session_state.channel_data[selected_channel], daily_data],
+                            ignore_index=True
+                        )
+                    
+                    # Adicionar ao histórico geral
+                    if not st.session_state.historical_data.empty:
+                        st.session_state.historical_data = pd.concat(
+                            [st.session_state.historical_data, daily_data],
+                            ignore_index=True
+                        )
+                    else:
+                        st.session_state.historical_data = daily_data
+                    
+                    st.success(f"✅ {len(daily_data)} registros de {CHANNELS[selected_channel]['name']} processados!")
+                    st.balloons()
+    
+    st.markdown("---")
+    
+    # Resumo de uploads
+    if not st.session_state.historical_data.empty:
+        st.subheader("📈 Dados Carregados")
         
-        # Carregar dados de vendas para análise
-        df_detalhes_vendas = carregar_dados('detalhes')
+        total_records = len(st.session_state.historical_data)
+        st.metric("Total de Registros", f"{total_records:,}")
         
-        if not df_detalhes_vendas.empty:
-            # Inicializar análise de ruptura
-            ruptura_analysis = RuptureAnalysis(df_detalhes_vendas, df_estoque)
+        # Mostrar canais carregados
+        if 'Canal' in st.session_state.historical_data.columns:
+            canais_unicos = st.session_state.historical_data['Canal'].unique()
+            st.write("**Canais:**")
+            for canal in canais_unicos:
+                qtd = len(st.session_state.historical_data[st.session_state.historical_data['Canal'] == canal])
+                st.write(f"• {canal}: {qtd:,} registros")
+    
+    st.markdown("---")
+    
+    # Filtros
+    if not st.session_state.historical_data.empty:
+        st.subheader("🔍 Filtros")
+        
+        # Filtro de canal
+        if 'Canal' in st.session_state.historical_data.columns:
+            canais_disponiveis = ['Todos'] + list(st.session_state.historical_data['Canal'].unique())
+            selected_filter_channel = st.selectbox("Canal", canais_disponiveis)
+        
+        # Filtro de data
+        date_range = st.date_input(
+            "Período",
+            value=(datetime.now() - timedelta(days=30), datetime.now())
+        )
+    
+    st.markdown("---")
+    st.caption("Desenvolvido com ❤️")
+
+# Main content
+if st.session_state.historical_data.empty:
+    # Tela inicial
+    st.markdown("""
+    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                padding: 40px; border-radius: 15px; color: white; margin-bottom: 30px;">
+        <h1 style="color: white; margin-bottom: 15px;">👋 Bem-vindo ao Sales BI Analytics</h1>
+        <p style="font-size: 18px; margin-bottom: 20px;">
+            Sistema profissional de Business Intelligence para análise de vendas multicanal
+        </p>
+        <p style="font-size: 14px; opacity: 0.9;">
+            📤 Faça upload das vendas na barra lateral para começar
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("### 📊 Upload Geral")
+        st.info("""
+        **Vendas Consolidadas**
+        
+        Faça upload de uma planilha com todas as vendas do dia, independente do canal.
+        
+        ✅ Análise geral de performance
+        ✅ Visão consolidada do negócio
+        ✅ KPIs totais
+        """)
+    
+    with col2:
+        st.markdown("### 🏪 Upload por Canal")
+        st.success("""
+        **Vendas Segmentadas**
+        
+        Faça upload separado por canal de venda para análise detalhada.
+        
+        ✅ Mercado Livre
+        ✅ Shopee Matriz
+        ✅ Shopee 1:50
+        ✅ Shein
+        """)
+    
+    st.markdown("---")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.info("📈 **Matriz BCG**\n\nClassifique produtos estrategicamente")
+    
+    with col2:
+        st.success("📊 **Pareto 80/20**\n\nIdentifique produtos-chave")
+    
+    with col3:
+        st.warning("📦 **Projeção de Estoque**\n\nPrevisões inteligentes")
+    
+    with col4:
+        st.error("📉 **Análise Multicanal**\n\nCompare performance")
+
+else:
+    # Aplicar filtros
+    df_filtered = st.session_state.historical_data.copy()
+    
+    if 'selected_filter_channel' in locals() and selected_filter_channel != 'Todos':
+        df_filtered = df_filtered[df_filtered['Canal'] == selected_filter_channel]
+    
+    # Dashboard principal
+    st.title("📊 Dashboard de Vendas")
+    
+    # KPIs principais
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    total_vendas = df_filtered['Quantidade'].sum()
+    produtos_vendidos = df_filtered['Produto'].nunique()
+    canais_ativos = df_filtered['Canal'].nunique() if 'Canal' in df_filtered.columns else 1
+    
+    # Calcular crescimento
+    df_filtered['Data'] = pd.to_datetime(df_filtered['Data'])
+    hoje = df_filtered['Data'].max()
+    ontem = hoje - timedelta(days=1)
+    
+    vendas_hoje = df_filtered[df_filtered['Data'] == hoje]['Quantidade'].sum()
+    vendas_ontem = df_filtered[df_filtered['Data'] == ontem]['Quantidade'].sum()
+    crescimento = ((vendas_hoje - vendas_ontem) / vendas_ontem * 100) if vendas_ontem > 0 else 0
+    
+    media_diaria = df_filtered.groupby('Data')['Quantidade'].sum().mean()
+    
+    with col1:
+        st.metric("Vendas Hoje", f"{vendas_hoje:,.0f}", f"{crescimento:+.1f}%")
+    
+    with col2:
+        st.metric("Produtos", f"{produtos_vendidos}")
+    
+    with col3:
+        st.metric("Canais Ativos", f"{canais_ativos}")
+    
+    with col4:
+        st.metric("Média Diária", f"{media_diaria:,.0f}")
+    
+    with col5:
+        st.metric("Total Período", f"{total_vendas:,.0f}")
+    
+    # Performance por canal
+    if 'Canal' in df_filtered.columns and df_filtered['Canal'].nunique() > 1:
+        st.markdown("---")
+        st.subheader("🏪 Performance por Canal")
+        
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            # Gráfico de vendas por canal
+            df_canal = df_filtered.groupby('Canal')['Quantidade'].sum().reset_index()
+            df_canal = df_canal.sort_values('Quantidade', ascending=False)
             
-            # Calcular cobertura
-            df_cobertura = ruptura_analysis.calcular_cobertura()
-            
-            if not df_cobertura.empty:
-                # Resumo executivo
-                resumo = ruptura_analysis.gerar_resumo_executivo()
-                
-                col1, col2, col3, col4 = st.columns(4)
-                col1.metric("🔴 Críticos", resumo.get('criticos', 0), 
-                           help="Produtos com menos de 3 dias de estoque")
-                col2.metric("🟡 Atenção", resumo.get('atencao', 0),
-                           help="Produtos com 3-7 dias de estoque")
-                col3.metric("🟢 OK", resumo.get('ok', 0),
-                           help="Produtos com mais de 7 dias de estoque")
-                col4.metric("⚪ Sem Vendas", resumo.get('sem_vendas', 0),
-                           help="Produtos sem vendas no período")
-                
-                # Tabela de cobertura
-                st.markdown("#### 📋 Dias de Cobertura por Produto")
-                
-                # Filtros
-                filtro_alerta = st.multiselect(
-                    "Filtrar por status:",
-                    options=['🔴 Crítico', '🟡 Atenção', '🟢 OK', '⚪ Sem Vendas'],
-                    default=['🔴 Crítico', '🟡 Atenção']
+            fig = px.bar(
+                df_canal,
+                x='Canal',
+                y='Quantidade',
+                title='Vendas por Canal',
+                color='Quantidade',
+                color_continuous_scale='Blues'
+            )
+            fig.update_layout(showlegend=False, height=350)
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            st.markdown("### 📊 Ranking de Canais")
+            for idx, row in df_canal.iterrows():
+                pct = row['Quantidade'] / df_canal['Quantidade'].sum() * 100
+                st.metric(
+                    row['Canal'],
+                    f"{row['Quantidade']:,.0f}",
+                    f"{pct:.1f}%"
                 )
-                
-                df_filtrado = df_cobertura[df_cobertura['alerta'].isin(filtro_alerta)]
-                
-                # Selecionar colunas relevantes para exibição
-                colunas_exibir = [
-                    'codigo', 'nome', 'categoria', 'estoque_atual', 
-                    'media_vendas_dia', 'dias_cobertura', 'alerta'
-                ]
-                colunas_disponiveis = [col for col in colunas_exibir if col in df_filtrado.columns]
-                
-                st.dataframe(
-                    df_filtrado[colunas_disponiveis],
-                    use_container_width=True,
-                    height=400
-                )
-                
-                # Projeção de ruptura
-                st.markdown("#### 📅 Previsão de Rupturas (Próximos 30 dias)")
-                df_ruptura = ruptura_analysis.projetar_ruptura(dias_futuros=30)
-                
-                if not df_ruptura.empty:
-                    st.warning(f"⚠️ {len(df_ruptura)} produtos com previsão de ruptura nos próximos 30 dias")
-                    
-                    colunas_ruptura = [
-                        'codigo', 'nome', 'estoque_atual', 'dias_cobertura',
-                        'data_ruptura_prevista', 'qtd_reposicao_sugerida', 'valor_reposicao'
-                    ]
-                    colunas_disp_ruptura = [col for col in colunas_ruptura if col in df_ruptura.columns]
-                    
-                    st.dataframe(
-                        df_ruptura[colunas_disp_ruptura],
-                        use_container_width=True
-                    )
-                    
-                    if 'investimento_reposicao' in resumo:
-                        st.info(f"💰 Investimento estimado para reposição: {format_currency_br(resumo['investimento_reposicao'])}")
-                else:
-                    st.success("✅ Nenhuma ruptura prevista nos próximos 30 dias!")
-            else:
-                st.info("📊 Não há dados de vendas suficientes para análise de ruptura")
-        else:
-            st.info("📊 Carregue dados de vendas na aba 'Detalhes' para habilitar análise de ruptura")
+    
+    st.markdown("---")
+    
+    # Tabs
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📈 Visão Geral",
+        "🎯 Matriz BCG",
+        "📊 Pareto",
+        "📦 Projeção",
+        "🏪 Análise Multicanal"
+    ])
+    
+    with tab1:
+        st.subheader("📈 Visão Geral")
         
-        st.divider()
-        
-        # ==============================================================
-        # SEÇÃO 3: SINCRONIZAÇÃO DE PRODUTOS
-        # ==============================================================
-        st.markdown("### 🔄 Sincronização de Produtos")
-        st.info("💡 Esta seção identifica produtos que existem na planilha BCG mas não estão cadastrados no estoque")
-        
-        # Carregar dados da BCG para comparação
-        df_bcg_produtos = carregar_dados('bcg')
-        
-        # Tentar carregar da aba principal também
-        if df_bcg_produtos.empty:
-            # Tentar ler diretamente a aba de produtos
-            try:
-                url_produtos = f"{BASE_URL}&gid=1037607798"  # GID da aba de produtos
-                r = requests.get(url_produtos, timeout=15)
-                r.raise_for_status()
-                df_bcg_produtos = pd.read_csv(StringIO(r.text))
-            except:
-                pass
-        
-        if not df_bcg_produtos.empty:
-            # Detectar produtos faltantes
-            df_faltantes = inv_integration.detectar_produtos_faltantes(df_bcg_produtos, df_estoque)
-            
-            if not df_faltantes.empty:
-                st.warning(f"⚠️ {len(df_faltantes)} produtos encontrados na BCG mas não no estoque")
-                
-                # Mostrar produtos faltantes
-                st.markdown("#### Produtos Faltantes")
-                # Mostrar apenas colunas que existem
-                cols_disponiveis = [col for col in df_faltantes.columns if col not in ['codigo_normalizado', 'ordem_alerta']]
-                st.dataframe(df_faltantes[cols_disponiveis[:5]].head(20), 
-                           use_container_width=True)
-                
-                # Gerar Excel para download
-                st.markdown("#### 📥 Exportar para Upload Manual")
-                st.write("""
-                    Clique no botão abaixo para baixar um arquivo Excel com os produtos faltantes
-                    no formato correto para upload na planilha template_estoque.
-                    
-                    ✅ Formato correto das colunas
-                    ✅ Estoque inicial = 0
-                    ✅ Custo importado da BCG
-                    ✅ Pronto para copiar e colar
-                """)
-                
-                excel_file = inv_integration.gerar_excel_para_upload(df_faltantes)
-                
-                if excel_file:
-                    st.download_button(
-                        label="📥 Baixar Excel de Produtos Faltantes",
-                        data=excel_file,
-                        file_name=f"produtos_faltantes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        help="Baixe este arquivo e faça upload manual na planilha template_estoque"
-                    )
-            else:
-                st.success("✅ Todos os produtos da BCG estão cadastrados no estoque!")
-        else:
-            st.info("📊 Carregue dados da BCG para habilitar sincronização")
-        
-        st.divider()
-        
-        # ==============================================================
-        # SEÇÃO 4: VISUALIZAÇÃO COMPLETA DO ESTOQUE
-        # ==============================================================
-        st.markdown("### 📋 Estoque Completo")
-        
-        # Filtros
         col1, col2 = st.columns(2)
         
         with col1:
-            if 'categoria' in df_estoque.columns:
-                categorias_selecionadas = st.multiselect(
-                    "Filtrar por categoria:",
-                    options=df_estoque['categoria'].unique(),
-                    default=df_estoque['categoria'].unique()
-                )
+            df_time = df_filtered.groupby('Data')['Quantidade'].sum().reset_index()
+            fig = px.line(df_time, x='Data', y='Quantidade', title='Evolução de Vendas', markers=True)
+            fig.update_layout(hovermode='x unified')
+            st.plotly_chart(fig, use_container_width=True)
         
         with col2:
-            filtro_estoque = st.radio(
-                "Filtrar estoque:",
-                options=["Todos", "Com estoque", "Sem estoque", "Abaixo do mínimo"],
-                horizontal=True
+            top_products = df_filtered.groupby('Produto')['Quantidade'].sum().nlargest(10).reset_index()
+            fig = px.bar(top_products, x='Quantidade', y='Produto', orientation='h',
+                        title='Top 10 Produtos', color='Quantidade', color_continuous_scale='Blues')
+            st.plotly_chart(fig, use_container_width=True)
+    
+    with tab2:
+        st.subheader("🎯 Matriz BCG")
+        
+        if len(df_filtered) > 10:
+            bcg = BCGAnalysis(df_filtered)
+            bcg_results = bcg.analyze()
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            for col, (categoria, emoji) in zip([col1, col2, col3, col4],
+                                               [('Estrela', '⭐'), ('Vaca Leiteira', '🐄'),
+                                                ('Interrogação', '❓'), ('Abacaxi', '🍍')]):
+                with col:
+                    cat_data = bcg_results[bcg_results['Categoria'] == categoria]
+                    st.metric(f"{emoji} {categoria}", len(cat_data))
+                    st.caption(f"{cat_data['Quantidade'].sum():,.0f} unidades")
+            
+            fig = bcg.plot_bcg_matrix(bcg_results)
+            st.plotly_chart(fig, use_container_width=True)
+            
+            st.dataframe(bcg_results, use_container_width=True, height=400)
+        else:
+            st.info("📊 Carregue mais dados para análise BCG")
+    
+    with tab3:
+        st.subheader("📊 Análise de Pareto")
+        
+        pareto = ParetoAnalysis(df_filtered)
+        pareto_results = pareto.analyze()
+        
+        fig = pareto.plot_pareto(pareto_results)
+        st.plotly_chart(fig, use_container_width=True)
+        
+        insights = pareto.get_insights(pareto_results)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.success(f"**💡 Insight Pareto**")
+            st.write(f"**{insights['produtos_top_80']} produtos** ({insights['percentual_produtos_top']:.1f}%) geram **80%** das vendas")
+        
+        with col2:
+            st.dataframe(pareto_results.head(20), use_container_width=True, height=300)
+    
+    with tab4:
+        st.subheader("📦 Projeção de Estoque")
+        
+        projection = StockProjection(df_filtered)
+        
+        col1, col2 = st.columns([1, 2])
+        
+        with col1:
+            horizon = st.selectbox("Horizonte", ["7 dias", "15 dias", "30 dias", "60 dias"])
+            confidence = st.slider("Confiança", 80, 99, 95)
+        
+        days = int(horizon.split()[0])
+        df_historical, df_projection = projection.project(days=days, confidence=confidence/100)
+        
+        fig = projection.plot_projection((df_historical, df_projection))
+        st.plotly_chart(fig, use_container_width=True)
+        
+        alerts = projection.get_alerts((df_historical, df_projection))
+        if not alerts.empty:
+            st.subheader("⚠️ Alertas")
+            for idx, alert in alerts.iterrows():
+                if alert['Tipo'] == 'Crítico':
+                    st.error(f"🔴 {alert['Mensagem']}")
+                else:
+                    st.warning(f"🟡 {alert['Mensagem']}")
+    
+    with tab5:
+        st.subheader("🏪 Análise Multicanal")
+        
+        if 'Canal' in df_filtered.columns and df_filtered['Canal'].nunique() > 1:
+            # Comparação de canais ao longo do tempo
+            df_canal_time = df_filtered.groupby(['Data', 'Canal'])['Quantidade'].sum().reset_index()
+            
+            fig = px.line(
+                df_canal_time,
+                x='Data',
+                y='Quantidade',
+                color='Canal',
+                title='Evolução de Vendas por Canal',
+                markers=True
             )
-        
-        # Aplicar filtros
-        df_estoque_filtrado = df_estoque.copy()
-        
-        if 'categoria' in df_estoque.columns and categorias_selecionadas:
-            df_estoque_filtrado = df_estoque_filtrado[
-                df_estoque_filtrado['categoria'].isin(categorias_selecionadas)
-            ]
-        
-        if filtro_estoque == "Com estoque":
-            df_estoque_filtrado = df_estoque_filtrado[df_estoque_filtrado['estoque_atual'] > 0]
-        elif filtro_estoque == "Sem estoque":
-            df_estoque_filtrado = df_estoque_filtrado[df_estoque_filtrado['estoque_atual'] == 0]
-        elif filtro_estoque == "Abaixo do mínimo":
-            if 'estoque_min' in df_estoque_filtrado.columns:
-                df_estoque_filtrado = df_estoque_filtrado[
-                    df_estoque_filtrado['estoque_atual'] < df_estoque_filtrado['estoque_min']
-                ]
-        
-        # Exibir tabela
-        st.dataframe(
-            df_estoque_filtrado,
-            use_container_width=True,
-            height=500
-        )
-        
-        st.caption(f"📊 Exibindo {len(df_estoque_filtrado)} de {len(df_estoque)} produtos")
+            fig.update_layout(hovermode='x unified')
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Tabela comparativa
+            st.subheader("📊 Comparativo de Canais")
+            
+            df_comp = df_filtered.groupby('Canal').agg({
+                'Quantidade': ['sum', 'mean', 'count'],
+                'Produto': 'nunique'
+            }).reset_index()
+            
+            df_comp.columns = ['Canal', 'Total Vendas', 'Média Diária', 'Num Vendas', 'Produtos Únicos']
+            df_comp = df_comp.sort_values('Total Vendas', ascending=False)
+            
+            st.dataframe(df_comp, use_container_width=True)
+        else:
+            st.info("📊 Carregue dados de múltiplos canais para análise comparativa")
