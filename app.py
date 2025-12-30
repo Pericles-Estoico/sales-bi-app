@@ -74,7 +74,7 @@ with st.sidebar:
     
     if st.button("🔄 Atualizar", use_container_width=True):
         st.cache_data.clear()
-        st.rerun()
+        st.success("✅ Cache limpo! Recarregue a página (F5)")
     
     st.divider()
     
