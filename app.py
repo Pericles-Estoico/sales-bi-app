@@ -10,450 +10,806 @@ import time
 import requests
 import math
 from io import StringIO
-import xlsxwriter
 
-# ==============================================================================
-# VERSÃO V54 - CORREÇÃO NOME DA ABA "Detalhes_Canais"
-# ==============================================================================
-# 1. Upload salva em "Detalhes_Canais" (com underscore!)
-# 2. Dashboard lê abas processadas corretamente
-# 3. Sistema de metas com indicadores visuais
-# ==============================================================================
+# ============================================
+# CONFIGURAÇÃO
+# ============================================
+st.set_page_config(
+    page_title="Sales BI Pro",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-st.set_page_config(page_title="Sales BI Pro", page_icon="📊", layout="wide")
-
-# ==============================================================================
-# CONFIGURAÇÕES - URLS DAS ABAS
-# ==============================================================================
+# IDs e URLs
 SHEET_ID = "1qoUk6AsNXLpHyzRrZplM4F5573zN9hUwQTNVUF3UC8E"
 BASE_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid="
 
+# GIDs das abas
 ABAS_URLS = {
-    'produtos': f"{BASE_URL}1037607798",
-    'kits': f"{BASE_URL}1569485799",
-    'custo_por_pedido': f"{BASE_URL}1720329296",
-    'canais': f"{BASE_URL}1639432432",
-    'impostos': f"{BASE_URL}260097325",
-    'frete': f"{BASE_URL}1928835495",
-    'metas': f"{BASE_URL}1477190272",
-    'dashboard_geral': f"{BASE_URL}749174572",
-    'detalhes_canais': f"{BASE_URL}961459380",
-    'resultado_cnpj': f"{BASE_URL}1830625125",
-    'executiva_simples': f"{BASE_URL}1734348857",
-    'preco_simples_mktp': f"{BASE_URL}2119792312",
-    'bcg_canal_mkt': f"{BASE_URL}914780374",
-    'vendas_sku_geral': f"{BASE_URL}1138113192",
-    'oportunidades_canais_mkt': f"{BASE_URL}706549654"
+    'produtos': BASE_URL + "1037607798",
+    'kits': BASE_URL + "1569485799",
+    'custo_pedido': BASE_URL + "1720329296",
+    'canais': BASE_URL + "1639432432",
+    'impostos': BASE_URL + "260097325",
+    'frete': BASE_URL + "1928835495",
+    'metas': BASE_URL + "1477190272",
+    'dashboard_geral': BASE_URL + "749174572",
+    'detalhes_canais': BASE_URL + "961459380",
+    'resultado_cnpj': BASE_URL + "1830625125",
+    'executiva_simples': BASE_URL + "1734348857",
+    'precos_simples_mktp': BASE_URL + "2119792312",
+    'bcg_canal_mkt': BASE_URL + "914780374",
+    'vendas_sku_geral': BASE_URL + "1138113192",
+    'oportunidades_canais_mkt': BASE_URL + "706549654"
 }
 
-# ==============================================================================
-# CONSTANTES
-# ==============================================================================
+# Canais disponíveis
 CHANNELS = {
-    'geral': '📊 Vendas Gerais',
-    'mercado_livre': '🛒 Mercado Livre',
-    'shopee_matriz': '🛍️ Shopee Matriz',
-    'shopee_150': '🏪 Shopee 1:50',
-    'shein': '👗 Shein'
+    "Geral": "geral",
+    "Mercado Livre": "mercado_livre",
+    "Shopee Matriz": "shopee_matriz",
+    "Shopee 1:50": "shopee_150",
+    "Shein": "shein"
 }
 
+# Colunas esperadas
 COLUNAS_ESPERADAS = [
-    'Data', 'Canal', 'CNPJ', 'Produto', 'Tipo', 'Quantidade', 'Total Venda',
-    'Custo Produto', 'Impostos', 'Comissão', 'Taxas Fixas', 'Embalagem',
-    'Investimento Ads', 'Custo Total', 'Lucro Bruto', 'Margem (%)'
+    'Data', 'Canal', 'CNPJ', 'Produto', 'Tipo', 'Quantidade',
+    'Total Venda', 'Custo Produto', 'Impostos', 'Comissão',
+    'Taxas Fixas', 'Embalagem', 'Investimento Ads', 'Custo Total',
+    'Lucro Bruto', 'Margem (%)'
 ]
 
-# ==============================================================================
+# Ordem BCG
+ORDEM_BCG = ['Vaca Leiteira 🐄', 'Estrela ⭐', 'Interrogação ❓', 'Abacaxi 🍍']
+
+# ============================================
 # FUNÇÕES UTILITÁRIAS
-# ==============================================================================
-def clean_currency(value):
-    if pd.isna(value) or value == '': return 0.0
-    s_val = str(value).strip().replace('R$', '').replace(' ', '')
-    s_val = s_val.replace('.', '').replace(',', '.')
-    try: return float(s_val)
-    except: return 0.0
+# ============================================
+def clean_currency(val):
+    """Remove R$, pontos e converte vírgula para ponto"""
+    if pd.isna(val):
+        return 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
+    val = str(val).strip()
+    val = val.replace('R$', '').replace(' ', '')
+    val = val.replace('.', '')  # Remove separador de milhar
+    val = val.replace(',', '.')  # Vírgula vira ponto
+    try:
+        return float(val)
+    except:
+        return 0.0
 
-def clean_percent(value):
-    if pd.isna(value) or value == '': return 0.0
-    s_val = str(value).strip().replace('%', '').replace(',', '.')
-    try: return float(s_val) / 100
-    except: return 0.0
+def clean_percent_read(val):
+    """Remove % e converte para decimal (ex: 45,5% -> 0.455)"""
+    if pd.isna(val):
+        return 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
+    val = str(val).strip()
+    val = val.replace('%', '').replace(' ', '')
+    val = val.replace(',', '.')
+    try:
+        num = float(val)
+        if num > 1:  # Se veio como 45.5 em vez de 0.455
+            num = num / 100
+        return num
+    except:
+        return 0.0
 
-def format_currency_br(value):
-    try: return f"R$ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except: return "R$ 0,00"
+def clean_float(val):
+    """Converte string para float (vírgula -> ponto)"""
+    if pd.isna(val):
+        return 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
+    val = str(val).strip()
+    val = val.replace(',', '.')
+    try:
+        return float(val)
+    except:
+        return 0.0
 
-def format_percent_br(value):
-    try: return f"{value * 100:.2f}%".replace(".", ",")
-    except: return "0,00%"
+def format_currency_br(val):
+    """Formata número como moeda brasileira"""
+    if pd.isna(val) or val == 0:
+        return "R$ 0,00"
+    return f"R$ {val:,.2f}".replace(',', '_').replace('.', ',').replace('_', '.')
+
+def format_percent_br(val):
+    """Formata número como percentual brasileiro"""
+    if pd.isna(val):
+        return "0,00%"
+    return f"{val*100:.2f}%".replace('.', ',')
+
+def to_excel(df):
+    """Converte DataFrame para Excel em memória"""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='Dados')
+    return output.getvalue()
 
 def normalizar(texto):
-    if pd.isna(texto): return ''
+    """Remove acentos e caracteres especiais"""
+    if pd.isna(texto):
+        return ""
     texto = str(texto)
-    texto = unicodedata.normalize('NFD', texto)
-    texto = ''.join(c for c in texto if unicodedata.category(c) != 'Mn')
-    return texto.lower().strip()
+    nfkd = unicodedata.normalize('NFKD', texto)
+    return "".join([c for c in nfkd if not unicodedata.combining(c)])
 
-# ==============================================================================
-# AUTENTICAÇÃO
-# ==============================================================================
+def normalize_key(key):
+    """Normaliza chave para comparação"""
+    return normalizar(str(key).lower().strip())
+
+def safe_int(val):
+    """Converte para int com segurança"""
+    try:
+        return int(float(val))
+    except:
+        return 0
+
+# ============================================
+# AUTENTICAÇÃO GOOGLE SHEETS
+# ============================================
+@st.cache_resource
 def get_gspread_client():
+    """Conecta ao Google Sheets com autenticação blindada"""
     try:
-        if "GOOGLE_SHEETS_CREDENTIALS" not in st.secrets:
-            st.error("❌ Credenciais não configuradas.")
-            return None
-
-        creds_input = st.secrets["GOOGLE_SHEETS_CREDENTIALS"]
+        creds_raw = st.secrets.get("GOOGLE_SHEETS_CREDENTIALS")
         
-        creds_dict = None
-        if hasattr(creds_input, "_data"):
-            creds_dict = dict(creds_input._data)
-        elif hasattr(creds_input, "to_dict"):
-            creds_dict = creds_input.to_dict()
-        elif isinstance(creds_input, dict):
-            creds_dict = dict(creds_input)
-        elif isinstance(creds_input, str):
-            creds_dict = json.loads(creds_input.strip())
-
+        if creds_raw is None:
+            st.error("❌ ERRO CRÍTICO: Credenciais não encontradas em st.secrets")
+            st.stop()
+        
+        # Converter para dict
+        if hasattr(creds_raw, 'to_dict'):
+            creds_dict = creds_raw.to_dict()
+        elif isinstance(creds_raw, dict):
+            creds_dict = creds_raw
+        else:
+            creds_dict = json.loads(str(creds_raw))
+        
+        # Normalizar private_key
         if 'private_key' in creds_dict:
-            creds_dict['private_key'] = creds_dict['private_key'].replace('\\\\n', '\n').replace('\\n', '\n')
-
-        scope = [
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive"
-        ]
+            pk = creds_dict['private_key']
+            pk = pk.replace('\\n', '\n')
+            if not pk.startswith('-----BEGIN PRIVATE KEY-----'):
+                pk = '-----BEGIN PRIVATE KEY-----\n' + pk
+            if not pk.endswith('-----END PRIVATE KEY-----\n'):
+                pk = pk + '\n-----END PRIVATE KEY-----\n'
+            creds_dict['private_key'] = pk
         
-        creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
-        return gspread.authorize(creds)
-
+        # Validar campos obrigatórios
+        required = ['type', 'project_id', 'private_key_id', 'private_key', 'client_email']
+        missing = [f for f in required if f not in creds_dict]
+        if missing:
+            st.error(f"❌ Campos faltando: {', '.join(missing)}")
+            st.stop()
+        
+        # Autenticar
+        scopes = [
+            'https://www.googleapis.com/auth/spreadsheets',
+            'https://www.googleapis.com/auth/drive'
+        ]
+        credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        client = gspread.authorize(credentials)
+        
+        # Testar conexão
+        try:
+            client.open_by_key(SHEET_ID)
+        except Exception as e:
+            st.error(f"❌ Erro ao abrir planilha: {str(e)}")
+            st.stop()
+        
+        return client
+        
     except Exception as e:
-        st.error(f"❌ Erro na autenticação: {str(e)}")
-        return None
+        st.error(f"❌ ERRO DE AUTENTICAÇÃO: {str(e)}")
+        st.stop()
 
-# ==============================================================================
-# SALVAMENTO (CORRIGIDO - Nome da aba com underscore)
-# ==============================================================================
-def salvar_dados_sheets(df_novos_dados):
-    client = get_gspread_client()
-    if not client:
-        return False
-    
+# ============================================
+# SALVAMENTO DE DADOS
+# ============================================
+def salvar_dados_sheets(df):
+    """Salva DataFrame na aba 'Detalhes_Canais' do Google Sheets"""
     try:
+        client = get_gspread_client()
         sh = client.open_by_key(SHEET_ID)
         
-        # CORREÇÃO: Nome correto da aba com underscore
-        worksheet = sh.worksheet("Detalhes_Canais")
+        # Tentar múltiplos nomes de aba
+        nomes_possiveis = ["Detalhes_Canais", "Detalhes Canais", "6. Detalhes", "DetalhesCanais"]
+        worksheet = None
         
-        colunas_planilha = worksheet.row_values(1)
-        if not colunas_planilha:
+        for nome in nomes_possiveis:
+            try:
+                worksheet = sh.worksheet(nome)
+                break
+            except:
+                continue
+        
+        if worksheet is None:
+            st.error(f"❌ Nenhuma aba encontrada. Tentou: {', '.join(nomes_possiveis)}")
+            return False
+        
+        # Obter cabeçalho atual
+        headers = worksheet.row_values(1)
+        if not headers:
             worksheet.append_row(COLUNAS_ESPERADAS)
-            colunas_planilha = COLUNAS_ESPERADAS
+            headers = COLUNAS_ESPERADAS
         
-        df_preparado = pd.DataFrame()
-        for col in colunas_planilha:
-            if col in df_novos_dados.columns:
-                df_preparado[col] = df_novos_dados[col]
+        # Alinhar DataFrame com as colunas da planilha
+        df_aligned = pd.DataFrame(columns=headers)
+        for col in headers:
+            if col in df.columns:
+                df_aligned[col] = df[col]
             else:
-                df_preparado[col] = ""
+                df_aligned[col] = ""
         
-        df_preparado = df_preparado.fillna("").astype(str)
-        dados_lista = df_preparado.values.tolist()
+        # Preencher vazios
+        df_aligned = df_aligned.fillna("")
         
-        if dados_lista:
-            worksheet.append_rows(dados_lista, value_input_option='USER_ENTERED')
-            st.success(f"✅ {len(dados_lista)} registros salvos em 'Detalhes_Canais'!")
-            return True
-        return False
-            
-    except gspread.exceptions.WorksheetNotFound:
-        st.error("❌ Aba 'Detalhes_Canais' não encontrada!")
-        st.info("💡 Verifique se o nome da aba está correto na planilha.")
-        return False
+        # Converter para lista de listas
+        rows = df_aligned.values.tolist()
+        
+        # Salvar em lote
+        if rows:
+            worksheet.append_rows(rows, value_input_option='RAW')
+        
+        st.success(f"✅ {len(rows)} linhas salvas na aba '{worksheet.title}'!")
+        
+        # ⏱️ AGUARDAR PROCESSAMENTO DAS FÓRMULAS
+        with st.spinner("⏱️ Aguardando Google Sheets processar fórmulas..."):
+            time.sleep(3)
+        
+        # 🔄 LIMPAR CACHE
+        st.cache_data.clear()
+        st.info("🔄 Cache limpo! Atualizando dados...")
+        
+        return True
+        
     except Exception as e:
         st.error(f"❌ Erro ao salvar: {str(e)}")
         return False
 
-# ==============================================================================
-# PREPARAÇÃO DE DADOS (Upload)
-# ==============================================================================
+# ============================================
+# PREPARAÇÃO DOS DADOS
+# ============================================
 def preparar_dados_para_salvar(df_raw, canal, cnpj, data_venda):
-    try:
-        df_prep = df_raw.copy()
-        
-        if df_prep.empty:
-            st.error("❌ DataFrame vazio!")
-            return pd.DataFrame()
-        
-        df_prep['Data'] = data_venda.strftime("%Y-%m-%d")
-        df_prep['Canal'] = CHANNELS.get(canal, canal)
-        df_prep['CNPJ'] = cnpj
-        
-        if 'Produto' not in df_prep.columns or 'Quantidade' not in df_prep.columns:
-            st.error("❌ Colunas 'Produto' e 'Quantidade' obrigatórias!")
-            return pd.DataFrame()
-        
-        df_prep['Quantidade'] = pd.to_numeric(df_prep['Quantidade'], errors='coerce').fillna(0).astype(int)
-        
-        if 'Total Venda' not in df_prep.columns:
-            df_prep['Total Venda'] = df_prep['Quantidade'] * 50.0
+    """Prepara DataFrame para salvar no Google Sheets"""
+    df = df_raw.copy()
+    
+    # Garantir colunas obrigatórias
+    df['Data'] = data_venda.strftime('%Y-%m-%d')
+    df['Canal'] = canal
+    df['CNPJ'] = cnpj
+    
+    # Verificar Produto
+    if 'Produto' not in df.columns:
+        st.error("❌ Coluna 'Produto' não encontrada!")
+        return None
+    
+    # Verificar e converter Quantidade
+    if 'Quantidade' not in df.columns:
+        st.error("❌ Coluna 'Quantidade' não encontrada!")
+        return None
+    
+    df['Quantidade'] = df['Quantidade'].apply(lambda x: safe_int(x))
+    df = df[df['Quantidade'] > 0]  # Remover linhas inválidas
+    
+    if df.empty:
+        st.error("❌ Nenhuma linha válida após filtrar Quantidade > 0")
+        return None
+    
+    # Total Venda
+    if 'Total Venda' not in df.columns:
+        st.warning("⚠️ 'Total Venda' não encontrado. Calculando: Quantidade × 50")
+        df['Total Venda'] = df['Quantidade'] * 50.0
+    else:
+        df['Total Venda'] = df['Total Venda'].apply(clean_currency)
+    
+    # Garantir colunas financeiras com defaults
+    colunas_financeiras = [
+        'Custo Produto', 'Impostos', 'Comissão', 'Taxas Fixas',
+        'Embalagem', 'Investimento Ads', 'Custo Total', 'Lucro Bruto'
+    ]
+    for col in colunas_financeiras:
+        if col not in df.columns:
+            df[col] = 0.0
         else:
-            df_prep['Total Venda'] = pd.to_numeric(df_prep['Total Venda'], errors='coerce').fillna(0.0)
-        
-        colunas_financeiras = {
-            'Tipo': 'Venda',
-            'Custo Produto': 0.0,
-            'Impostos': 0.0,
-            'Comissão': 0.0,
-            'Taxas Fixas': 0.0,
-            'Embalagem': 0.0,
-            'Investimento Ads': 0.0,
-            'Custo Total': 0.0,
-            'Lucro Bruto': 0.0,
-            'Margem (%)': 0.0
-        }
-        
-        for col, valor in colunas_financeiras.items():
-            if col not in df_prep.columns:
-                df_prep[col] = valor
-        
-        df_final = pd.DataFrame()
-        for col in COLUNAS_ESPERADAS:
-            df_final[col] = df_prep[col] if col in df_prep.columns else ""
-        
-        st.success(f"✅ {len(df_final)} linhas preparadas!")
-        return df_final
-        
-    except Exception as e:
-        st.error(f"❌ Erro: {str(e)}")
-        return pd.DataFrame()
+            df[col] = df[col].apply(clean_currency)
+    
+    # Tipo e Margem
+    df['Tipo'] = 'Venda'
+    if 'Margem (%)' not in df.columns:
+        df['Margem (%)'] = 0.0
+    else:
+        df['Margem (%)'] = df['Margem (%)'].apply(clean_percent_read)
+    
+    # Reordenar para COLUNAS_ESPERADAS
+    df_final = pd.DataFrame()
+    for col in COLUNAS_ESPERADAS:
+        if col in df.columns:
+            df_final[col] = df[col]
+        else:
+            df_final[col] = 0.0 if col not in ['Data', 'Canal', 'CNPJ', 'Produto', 'Tipo'] else ""
+    
+    return df_final
 
-# ==============================================================================
-# CARREGAMENTO DE DADOS (Dashboard)
-# ==============================================================================
+# ============================================
+# CARREGAMENTO DE DADOS
+# ============================================
 @st.cache_data(ttl=300)
 def carregar_aba(nome_aba):
+    """Carrega uma aba da planilha via CSV export"""
     try:
-        url = ABAS_URLS.get(nome_aba)
-        if not url:
+        if nome_aba not in ABAS_URLS:
+            st.warning(f"⚠️ Aba '{nome_aba}' não encontrada em ABAS_URLS")
             return pd.DataFrame()
         
-        r = requests.get(url, timeout=15)
-        r.raise_for_status()
-        df = pd.read_csv(StringIO(r.text))
+        url = ABAS_URLS[nome_aba]
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
         
-        for col in df.columns:
-            if any(x in col.lower() for x in ['venda', 'lucro', 'custo', 'valor', 'total', 'r$']):
+        df = pd.read_csv(StringIO(response.text))
+        
+        if df.empty:
+            return df
+        
+        # Limpeza de colunas monetárias
+        colunas_monetarias = [
+            'Total Venda', 'Custo Produto', 'Impostos', 'Comissão',
+            'Taxas Fixas', 'Embalagem', 'Investimento Ads',
+            'Custo Total', 'Lucro Bruto'
+        ]
+        for col in colunas_monetarias:
+            if col in df.columns:
                 df[col] = df[col].apply(clean_currency)
-            elif 'margem' in col.lower() or '%' in col.lower():
-                df[col] = df[col].apply(clean_percent)
-            elif 'quantidade' in col.lower() or 'qtd' in col.lower():
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
+        
+        # Quantidade
+        if 'Quantidade' in df.columns:
+            df['Quantidade'] = df['Quantidade'].apply(lambda x: safe_int(clean_float(x)))
+        
+        # Margem (%)
+        if 'Margem (%)' in df.columns:
+            df['Margem (%)'] = df['Margem (%)'].apply(clean_percent_read)
+        
+        # Remover linhas inválidas
+        if 'Produto' in df.columns:
+            df = df[df['Produto'].notna()]
+            df = df[df['Produto'] != '']
+        
+        if 'Quantidade' in df.columns:
+            df = df[df['Quantidade'] > 0]
         
         return df
+        
     except Exception as e:
-        st.error(f"❌ Erro ao carregar {nome_aba}: {e}")
+        st.error(f"❌ Erro ao carregar '{nome_aba}': {str(e)}")
         return pd.DataFrame()
 
 @st.cache_data(ttl=300)
 def carregar_metas():
-    return {
-        'margem_minima': 0.20,
-        'margem_ideal': 0.30,
-        'ticket_minimo': 45.0,
-        'ticket_ideal': 60.0
-    }
-
-def get_status_meta(valor, minimo, ideal, tipo='margem'):
-    if tipo == 'margem':
-        if valor >= ideal: return "🟢 Ideal"
-        elif valor >= minimo: return "🟡 Atenção"
-        else: return "🔴 Crítico"
-    else:
-        if valor >= ideal: return "🟢 Ideal"
-        elif valor >= minimo: return "🟡 Atenção"
-        else: return "🔴 Crítico"
-
-# ==============================================================================
-# INTERFACE PRINCIPAL
-# ==============================================================================
-st.sidebar.title("🔧 Status da Conexão")
-
-if st.sidebar.button("🔍 Testar Conexão"):
-    client = get_gspread_client()
-    if client:
-        try:
-            sh = client.open_by_key(SHEET_ID)
-            st.sidebar.success(f"✅ Conectado: {sh.title}")
-            ws = sh.worksheet("Detalhes_Canais")
-            st.sidebar.info(f"📊 Linhas: {ws.row_count}")
-        except Exception as e:
-            st.sidebar.error(f"❌ Erro: {e}")
-
-st.sidebar.divider()
-
-if 'sandbox_mode' not in st.session_state:
-    st.session_state.sandbox_mode = False
-
-st.sidebar.checkbox("🧪 MODO SIMULAÇÃO", key="sandbox_mode")
-
-if st.session_state.sandbox_mode:
-    st.sidebar.warning("⚠️ SIMULAÇÃO ATIVA")
-
-st.sidebar.divider()
-st.sidebar.header("📥 Importar Vendas")
-
-if st.sidebar.button("🔄 Atualizar Cache"):
-    st.cache_data.clear()
-    st.rerun()
-
-canal = st.sidebar.selectbox("Canal", list(CHANNELS.keys()), format_func=lambda x: CHANNELS[x])
-cnpj = st.sidebar.selectbox("CNPJ/Regime", ["Simples Nacional", "Lucro Presumido"])
-data_venda = st.sidebar.date_input("Data", datetime.now())
-
-uploaded_file = st.sidebar.file_uploader("Arquivo Excel", type=["xlsx", "xls"])
-
-# ==============================================================================
-# PROCESSAMENTO DE UPLOAD
-# ==============================================================================
-if uploaded_file:
-    try:
-        df = pd.read_excel(uploaded_file)
-        st.info(f"📄 {len(df)} linhas | Colunas: {', '.join(df.columns)}")
-        
-        cols_map = {c: normalizar(c) for c in df.columns}
-        col_produto = next((k for k, v in cols_map.items() if any(x in v for x in ['produto', 'descricao', 'codigo', 'item'])), None)
-        col_qtd = next((k for k, v in cols_map.items() if any(x in v for x in ['quantidade', 'qtd', 'qtde'])), None)
-        col_valor = next((k for k, v in cols_map.items() if any(x in v for x in ['valor', 'total', 'preco'])), None)
-
-        if col_produto and col_qtd:
-            rename_dict = {col_produto: 'Produto', col_qtd: 'Quantidade'}
-            if col_valor:
-                rename_dict[col_valor] = 'Total Venda'
-            
-            df = df.rename(columns=rename_dict)
-            df['Produto'] = df['Produto'].astype(str).str.strip()
-            df['Quantidade'] = pd.to_numeric(df['Quantidade'], errors='coerce').fillna(1).astype(int)
-            
-            if 'Total Venda' in df.columns:
-                df['Total Venda'] = pd.to_numeric(df['Total Venda'], errors='coerce').fillna(0.0)
-            
-            btn_label = "🧪 Simular" if st.session_state.sandbox_mode else "🔍 Pré-visualizar"
-            
-            if st.sidebar.button(btn_label):
-                df_preparado = preparar_dados_para_salvar(df, canal, cnpj, data_venda)
-                
-                if not df_preparado.empty:
-                    st.session_state.novos_dados_temp = df_preparado
-                    st.markdown("### 📊 Dados Preparados")
-                    st.dataframe(df_preparado, use_container_width=True)
-                
-            if 'novos_dados_temp' in st.session_state and not st.session_state.sandbox_mode:
-                st.sidebar.divider()
-                st.sidebar.markdown("### 🔒 Finalização")
-                
-                confirmacao = st.sidebar.checkbox("✅ Dados corretos", key="check_confirmacao")
-                
-                if confirmacao:
-                    st.sidebar.warning("⚠️ Ação irreversível!")
-                    if st.sidebar.button("💾 SALVAR", type="primary"):
-                        sucesso = salvar_dados_sheets(st.session_state.novos_dados_temp)
-                        if sucesso:
-                            st.success("✅ Salvo! Aguarde 1-2 min para fórmulas processarem.")
-                            del st.session_state.novos_dados_temp
-                            time.sleep(2)
-                            st.cache_data.clear()
-                            st.rerun()
-                else:
-                    st.sidebar.info("👆 Marque para habilitar")
-
-        else:
-            st.error("❌ Colunas 'Produto' e 'Quantidade' não encontradas!")
-            
-    except Exception as e:
-        st.error(f"❌ Erro: {str(e)}")
-
-# ==============================================================================
-# DASHBOARD
-# ==============================================================================
-st.title("📊 Sales BI Pro")
-
-tabs = st.tabs([
-    "📈 Dashboard Geral", "🏢 Resultado CNPJ", "⭐ BCG por Canal", 
-    "💲 Preços MKTP", "🔄 Giro SKU", "🚀 Oportunidades"
-])
-
-metas = carregar_metas()
-
-with tabs[0]:
-    df_dash = carregar_aba('dashboard_geral')
+    """Carrega as metas da planilha"""
+    df = carregar_aba('metas')
+    if df.empty:
+        return {
+            'margem_minima': 0.20,
+            'margem_ideal': 0.30,
+            'ticket_minimo': 45.0,
+            'ticket_ideal': 60.0
+        }
     
-    if not df_dash.empty:
-        st.subheader("📊 Resumo por Canal")
+    try:
+        metas = {}
+        for _, row in df.iterrows():
+            chave = normalize_key(row.get('Métrica', ''))
+            valor = clean_float(row.get('Valor', 0))
+            
+            if 'margem' in chave and 'minima' in chave:
+                metas['margem_minima'] = valor / 100 if valor > 1 else valor
+            elif 'margem' in chave and 'ideal' in chave:
+                metas['margem_ideal'] = valor / 100 if valor > 1 else valor
+            elif 'ticket' in chave and 'minimo' in chave:
+                metas['ticket_minimo'] = valor
+            elif 'ticket' in chave and 'ideal' in chave:
+                metas['ticket_ideal'] = valor
         
-        total_vendas = df_dash['Total Venda'].sum() if 'Total Venda' in df_dash.columns else 0
-        total_lucro = df_dash['Lucro Bruto'].sum() if 'Lucro Bruto' in df_dash.columns else 0
-        total_qtd = df_dash['Quantidade'].sum() if 'Quantidade' in df_dash.columns else 0
+        # Defaults se não encontrar
+        metas.setdefault('margem_minima', 0.20)
+        metas.setdefault('margem_ideal', 0.30)
+        metas.setdefault('ticket_minimo', 45.0)
+        metas.setdefault('ticket_ideal', 60.0)
         
-        margem_geral = (total_lucro / total_vendas) if total_vendas > 0 else 0
-        ticket_medio = (total_vendas / total_qtd) if total_qtd > 0 else 0
+        return metas
         
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("💰 Total Vendas", format_currency_br(total_vendas))
-        c2.metric("💎 Lucro Bruto", format_currency_br(total_lucro))
-        c3.metric("📊 Margem Geral", format_percent_br(margem_geral), 
-                  delta=get_status_meta(margem_geral, metas['margem_minima'], metas['margem_ideal']))
-        c4.metric("🎫 Ticket Médio", format_currency_br(ticket_medio),
-                  delta=get_status_meta(ticket_medio, metas['ticket_minimo'], metas['ticket_ideal'], 'ticket'))
-        
-        st.dataframe(df_dash, use_container_width=True)
-        
-        if 'Canal' in df_dash.columns and 'Total Venda' in df_dash.columns:
-            st.subheader("📈 Vendas por Canal")
-            vendas_canal = df_dash.set_index('Canal')['Total Venda'].sort_values(ascending=False)
-            st.bar_chart(vendas_canal)
-    else:
-        st.info("📊 Carregando dados...")
+    except Exception as e:
+        st.error(f"❌ Erro ao processar metas: {str(e)}")
+        return {
+            'margem_minima': 0.20,
+            'margem_ideal': 0.30,
+            'ticket_minimo': 45.0,
+            'ticket_ideal': 60.0
+        }
 
-with tabs[1]:
-    df_cnpj = carregar_aba('resultado_cnpj')
-    if not df_cnpj.empty:
-        st.subheader("🏢 Análise por CNPJ")
-        st.dataframe(df_cnpj, use_container_width=True)
-    else:
-        st.info("Sem dados")
+def get_status_meta(valor, minimo, ideal, inverso=False):
+    """Retorna emoji de status baseado nas metas"""
+    if inverso:  # Para valores onde menor é melhor
+        if valor <= ideal:
+            return "🟢"
+        elif valor <= minimo:
+            return "🟡"
+        else:
+            return "🔴"
+    else:  # Para valores onde maior é melhor
+        if valor >= ideal:
+            return "🟢"
+        elif valor >= minimo:
+            return "🟡"
+        else:
+            return "🔴"
 
-with tabs[2]:
-    df_bcg = carregar_aba('bcg_canal_mkt')
-    if not df_bcg.empty:
-        st.subheader("⭐ Matriz BCG por Canal")
-        st.dataframe(df_bcg, use_container_width=True)
-    else:
-        st.info("Sem dados")
-
-with tabs[3]:
-    df_precos = carregar_aba('preco_simples_mktp')
-    if not df_precos.empty:
-        st.subheader("💲 Análise de Preços por Marketplace")
-        st.dataframe(df_precos, use_container_width=True)
-    else:
-        st.info("Sem dados")
-
-with tabs[4]:
-    df_giro = carregar_aba('vendas_sku_geral')
-    if not df_giro.empty:
-        st.subheader("🔄 Giro de Produtos (Geral)")
-        st.dataframe(df_giro, use_container_width=True)
+# ============================================
+# INTERFACE PRINCIPAL
+# ============================================
+def main():
+    st.title("📊 Sales BI Pro - V55")
+    st.caption("Análise Integrada de Vendas | Todas as Abas Conectadas")
+    
+    # ============================================
+    # SIDEBAR - DIAGNÓSTICO E IMPORTAÇÃO
+    # ============================================
+    with st.sidebar:
+        st.header("🔧 Configuração")
         
-        if 'Quantidade' in df_giro.columns:
-            top20 = df_giro.nlargest(20, 'Quantidade')
-            st.bar_chart(top20.set_index('Produto')['Quantidade'] if 'Produto' in top20.columns else top20['Quantidade'])
-    else:
-        st.info("Sem dados")
+        # DIAGNÓSTICO DE CONEXÃO
+        if st.button("🔍 Testar Conexão"):
+            with st.spinner("Testando conexão..."):
+                try:
+                    client = get_gspread_client()
+                    sh = client.open_by_key(SHEET_ID)
+                    st.success(f"✅ Conectado! Planilha: **{sh.title}**")
+                    
+                    # Testar todas as abas
+                    st.info("📊 **Linhas por aba:**")
+                    for nome_aba in ABAS_URLS.keys():
+                        df = carregar_aba(nome_aba)
+                        st.write(f"- {nome_aba}: {len(df)} linhas")
+                    
+                except Exception as e:
+                    st.error(f"❌ Erro: {str(e)}")
+        
+        st.divider()
+        
+        # MODO SIMULAÇÃO
+        st.header("🧪 Modo de Operação")
+        modo_simulacao = st.checkbox(
+            "🔒 MODO SIMULAÇÃO (Sandbox)",
+            value=st.session_state.get('modo_simulacao', False),
+            help="Ativado: dados não são salvos na planilha oficial"
+        )
+        st.session_state['modo_simulacao'] = modo_simulacao
+        
+        if modo_simulacao:
+            st.warning("⚠️ **MODO SIMULAÇÃO ATIVO** - Dados não serão salvos!")
+        
+        st.divider()
+        
+        # ATUALIZAR DADOS
+        st.header("🔄 Gerenciamento")
+        if st.button("🔄 Atualizar Dados (Limpar Cache)"):
+            st.cache_data.clear()
+            st.success("✅ Cache limpo! Recarregando...")
+            st.rerun()
+        
+        st.divider()
+        
+        # IMPORTAÇÃO DE VENDAS
+        st.header("📥 Importar Novas Vendas")
+        
+        # Formato
+        formato = st.radio(
+            "Formato de Origem:",
+            ["Padrão", "Bling"],
+            help="Padrão: Produto, Quantidade, Valor | Bling: colunas do Bling"
+        )
+        
+        # Canal
+        canal_display = st.selectbox("Canal de Venda:", list(CHANNELS.keys()))
+        canal = CHANNELS[canal_display]
+        
+        # CNPJ
+        cnpj = st.selectbox(
+            "CNPJ / Regime:",
+            ["Simples Nacional", "Lucro Presumido"]
+        )
+        
+        # Data
+        data_venda = st.date_input(
+            "Data da Venda:",
+            value=datetime.now()
+        )
+        
+        # Upload
+        uploaded_file = st.file_uploader(
+            "Arquivo Excel (.xlsx ou .xls):",
+            type=['xlsx', 'xls'],
+            help="Upload do arquivo de vendas"
+        )
+        
+        if uploaded_file:
+            try:
+                # Ler Excel
+                df_upload = pd.read_excel(uploaded_file)
+                
+                st.success(f"✅ Arquivo carregado: {len(df_upload)} linhas")
+                
+                # Detectar colunas
+                colunas = df_upload.columns.tolist()
+                colunas_norm = [normalize_key(c) for c in colunas]
+                
+                # Mapear Produto
+                col_produto = None
+                for i, cn in enumerate(colunas_norm):
+                    if 'produto' in cn or 'item' in cn or 'codigo' in cn or 'sku' in cn:
+                        col_produto = colunas[i]
+                        break
+                
+                # Mapear Quantidade
+                col_quantidade = None
+                for i, cn in enumerate(colunas_norm):
+                    if 'quantidade' in cn or 'qtde' in cn or 'qtd' in cn:
+                        col_quantidade = colunas[i]
+                        break
+                
+                # Mapear Total Venda
+                col_valor = None
+                for i, cn in enumerate(colunas_norm):
+                    if 'valor' in cn or 'total' in cn or 'preco' in cn:
+                        col_valor = colunas[i]
+                        break
+                
+                # Renomear
+                rename_map = {}
+                if col_produto:
+                    rename_map[col_produto] = 'Produto'
+                if col_quantidade:
+                    rename_map[col_quantidade] = 'Quantidade'
+                if col_valor:
+                    rename_map[col_valor] = 'Total Venda'
+                
+                if rename_map:
+                    df_upload = df_upload.rename(columns=rename_map)
+                
+                # Verificar se tem as colunas mínimas
+                if 'Produto' not in df_upload.columns or 'Quantidade' not in df_upload.columns:
+                    st.error("❌ Colunas 'Produto' e 'Quantidade' não encontradas!")
+                    st.info("**Colunas detectadas:**")
+                    st.write(colunas)
+                else:
+                    # Mostrar mapeamento
+                    st.info("**Mapeamento de colunas:**")
+                    for old, new in rename_map.items():
+                        st.write(f"- {old} → {new}")
+                    
+                    # Botões de ação
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        if st.button("🧪 Simular", use_container_width=True):
+                            st.session_state['modo_simulacao'] = True
+                            df_prep = preparar_dados_para_salvar(df_upload, canal, cnpj, data_venda)
+                            if df_prep is not None:
+                                st.session_state['novos_dados_temp'] = df_prep
+                                st.success(f"✅ Simulação: {len(df_prep)} linhas preparadas")
+                    
+                    with col2:
+                        if st.button("🔍 Pré-visualizar", use_container_width=True):
+                            df_prep = preparar_dados_para_salvar(df_upload, canal, cnpj, data_venda)
+                            if df_prep is not None:
+                                st.session_state['novos_dados_temp'] = df_prep
+                                st.success(f"✅ Pré-visualização: {len(df_prep)} linhas")
+                    
+                    # Pré-visualização
+                    if 'novos_dados_temp' in st.session_state:
+                        st.divider()
+                        st.subheader("👁️ Pré-visualização")
+                        st.dataframe(
+                            st.session_state['novos_dados_temp'].head(10),
+                            use_container_width=True
+                        )
+                        
+                        # Estatísticas
+                        df_temp = st.session_state['novos_dados_temp']
+                        total_vendas = df_temp['Total Venda'].sum()
+                        total_pecas = df_temp['Quantidade'].sum()
+                        ticket = total_vendas / len(df_temp) if len(df_temp) > 0 else 0
+                        
+                        col1, col2, col3 = st.columns(3)
+                        col1.metric("Total", format_currency_br(total_vendas))
+                        col2.metric("Peças", f"{total_pecas:,}")
+                        col3.metric("Ticket", format_currency_br(ticket))
+                        
+                        # Confirmação de salvamento
+                        if not st.session_state.get('modo_simulacao', False):
+                            confirmar = st.checkbox(
+                                "✅ Confirmo que analisei a simulação e os dados estão corretos.",
+                                key="confirmar_salvar"
+                            )
+                            
+                            if confirmar:
+                                if st.button("💾 SALVAR DADOS NA PLANILHA (OFICIAL)", type="primary", use_container_width=True):
+                                    with st.spinner("Salvando na planilha..."):
+                                        sucesso = salvar_dados_sheets(df_temp)
+                                        if sucesso:
+                                            # Limpar temporários
+                                            del st.session_state['novos_dados_temp']
+                                            st.balloons()
+                                            st.success("🎉 Dados salvos com sucesso!")
+                                            time.sleep(2)
+                                            st.rerun()
+                        else:
+                            st.info("🔒 Modo Simulação ativo - desative para salvar")
+                
+            except Exception as e:
+                st.error(f"❌ Erro ao processar arquivo: {str(e)}")
+    
+    # ============================================
+    # ÁREA PRINCIPAL - DASHBOARD
+    # ============================================
+    
+    # Carregar metas
+    metas = carregar_metas()
+    
+    # Carregar dados do DASHBOARD GERAL (NÃO Detalhes_Canais)
+    with st.spinner("📊 Carregando dados do Dashboard Geral..."):
+        df_geral = carregar_aba('dashboard_geral')
+    
+    if df_geral.empty:
+        st.warning("⚠️ Nenhum dado encontrado no Dashboard Geral")
+        st.info("💡 **Dica:** Verifique se a planilha tem dados processados ou faça upload de vendas")
+        return
+    
+    st.success(f"✅ {len(df_geral)} registros carregados do Dashboard Geral")
+    
+    # MÉTRICAS PRINCIPAIS
+    st.header("📈 Métricas Principais")
+    
+    # Calcular métricas
+    total_vendas = df_geral['Total Venda'].sum() if 'Total Venda' in df_geral.columns else 0
+    total_lucro = df_geral['Lucro Bruto'].sum() if 'Lucro Bruto' in df_geral.columns else 0
+    margem_media = (total_lucro / total_vendas) if total_vendas > 0 else 0
+    ticket_medio = total_vendas / len(df_geral) if len(df_geral) > 0 else 0
+    
+    # Exibir métricas
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric(
+            "💰 Vendas Totais",
+            format_currency_br(total_vendas)
+        )
+    
+    with col2:
+        st.metric(
+            "💵 Lucro Bruto",
+            format_currency_br(total_lucro)
+        )
+    
+    with col3:
+        status_margem = get_status_meta(margem_media, metas['margem_minima'], metas['margem_ideal'])
+        st.metric(
+            f"{status_margem} Margem Média",
+            format_percent_br(margem_media)
+        )
+    
+    with col4:
+        status_ticket = get_status_meta(ticket_medio, metas['ticket_minimo'], metas['ticket_ideal'])
+        st.metric(
+            f"{status_ticket} Ticket Médio",
+            format_currency_br(ticket_medio)
+        )
+    
+    # ABAS DO DASHBOARD
+    tabs = st.tabs([
+        "📊 Dashboard Geral",
+        "🏢 Resultado CNPJ",
+        "🎯 BCG por Canal",
+        "💲 Preços MKTP",
+        "🔄 Giro SKU",
+        "💡 Oportunidades"
+    ])
+    
+    # TAB 1: Dashboard Geral
+    with tabs[0]:
+        st.subheader("📊 Visão Geral por Canal")
+        
+        if 'Canal' in df_geral.columns:
+            # Vendas por canal
+            vendas_canal = df_geral.groupby('Canal').agg({
+                'Total Venda': 'sum',
+                'Lucro Bruto': 'sum',
+                'Quantidade': 'sum'
+            }).reset_index()
+            
+            vendas_canal['Margem (%)'] = vendas_canal['Lucro Bruto'] / vendas_canal['Total Venda']
+            vendas_canal = vendas_canal.sort_values('Total Venda', ascending=False)
+            
+            # Gráfico
+            st.bar_chart(vendas_canal.set_index('Canal')['Total Venda'])
+            
+            # Tabela
+            st.dataframe(
+                vendas_canal.style.format({
+                    'Total Venda': format_currency_br,
+                    'Lucro Bruto': format_currency_br,
+                    'Margem (%)': format_percent_br,
+                    'Quantidade': '{:,.0f}'
+                }),
+                use_container_width=True
+            )
+        else:
+            st.dataframe(df_geral.head(20), use_container_width=True)
+    
+    # TAB 2: Resultado CNPJ
+    with tabs[1]:
+        st.subheader("🏢 Resultado por CNPJ")
+        df_cnpj = carregar_aba('resultado_cnpj')
+        
+        if not df_cnpj.empty:
+            st.dataframe(df_cnpj, use_container_width=True)
+        else:
+            st.info("📭 Nenhum dado disponível")
+    
+    # TAB 3: BCG por Canal
+    with tabs[2]:
+        st.subheader("🎯 Matriz BCG por Canal")
+        df_bcg = carregar_aba('bcg_canal_mkt')
+        
+        if not df_bcg.empty:
+            st.dataframe(df_bcg, use_container_width=True)
+        else:
+            st.info("📭 Nenhum dado disponível")
+    
+    # TAB 4: Preços MKTP
+    with tabs[3]:
+        st.subheader("💲 Análise de Preços Marketplace")
+        df_precos = carregar_aba('precos_simples_mktp')
+        
+        if not df_precos.empty:
+            st.dataframe(df_precos, use_container_width=True)
+        else:
+            st.info("📭 Nenhum dado disponível")
+    
+    # TAB 5: Giro SKU
+    with tabs[4]:
+        st.subheader("🔄 Giro de Produtos (SKU)")
+        df_giro = carregar_aba('vendas_sku_geral')
+        
+        if not df_giro.empty:
+            # Top 20
+            st.subheader("🏆 Top 20 Produtos")
+            top20 = df_giro.nlargest(20, 'Quantidade') if 'Quantidade' in df_giro.columns else df_giro.head(20)
+            st.bar_chart(top20.set_index('Produto')['Quantidade'] if 'Produto' in df_giro.columns else top20)
+            
+            st.dataframe(df_giro, use_container_width=True)
+        else:
+            st.info("📭 Nenhum dado disponível")
+    
+    # TAB 6: Oportunidades
+    with tabs[5]:
+        st.subheader("💡 Oportunidades de Melhoria")
+        df_oport = carregar_aba('oportunidades_canais_mkt')
+        
+        if not df_oport.empty:
+            st.dataframe(df_oport, use_container_width=True)
+        else:
+            st.info("📭 Nenhum dado disponível")
+    
+    # RODAPÉ
+    st.divider()
+    st.caption("📊 Sales BI Pro V55 | Integração Completa Google Sheets")
 
-with tabs[5]:
-    df_oport = carregar_aba('oportunidades_canais_mkt')
-    if not df_oport.empty:
-        st.subheader("🚀 Oportunidades por Canal")
-        st.dataframe(df_oport, use_container_width=True)
-    else:
-        st.info("Sem dados")
+if __name__ == "__main__":
+    main()
