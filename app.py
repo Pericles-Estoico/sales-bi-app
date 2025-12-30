@@ -116,33 +116,53 @@ def safe_int(x, default=0):
 # ==============================================================================
 def get_gspread_client():
     try:
-        if "GOOGLE_SHEETS_CREDENTIALS" in st.secrets:
-            creds_data = st.secrets["GOOGLE_SHEETS_CREDENTIALS"]
-            
-            # Garante formato de dicionário
-            if isinstance(creds_data, str):
-                try:
-                    creds_dict = json.loads(creds_data)
-                except:
-                    creds_dict = dict(creds_data)
-            elif hasattr(creds_data, 'to_dict'):
-                creds_dict = creds_data.to_dict()
-            else:
-                creds_dict = dict(creds_data)
-            
-            scope = [
-                "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive"
-            ]
-            
-            # Nova forma de autenticação (google-auth)
-            creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
-            return gspread.authorize(creds)
-        else:
-            st.error("Credenciais não encontradas.")
+        if "GOOGLE_SHEETS_CREDENTIALS" not in st.secrets:
+            st.error("Credenciais não encontradas nos secrets.")
             return None
+
+        creds_input = st.secrets["GOOGLE_SHEETS_CREDENTIALS"]
+        
+        # BLINDAGEM DE TIPO: Converte qualquer entrada para dicionário Python puro
+        if isinstance(creds_input, str):
+            # Se for string, tenta decodificar JSON
+            try:
+                creds_dict = json.loads(creds_input)
+            except json.JSONDecodeError:
+                # Se falhar, assume que é um objeto AttrDict do Streamlit convertido para string errada
+                # Tenta acessar como objeto direto se possível, ou falha com erro claro
+                st.error("Erro: As credenciais estão como string mas não são um JSON válido.")
+                return None
+        elif hasattr(creds_input, "to_dict"):
+            # Se for objeto do Streamlit (AttrDict), converte para dict
+            creds_dict = creds_input.to_dict()
+        elif isinstance(creds_input, dict):
+            # Se já for dict, usa direto
+            creds_dict = creds_input
+        else:
+            # Tenta conversão forçada para dict
+            try:
+                creds_dict = dict(creds_input)
+            except:
+                st.error(f"Erro: Formato de credenciais desconhecido ({type(creds_input)}).")
+                return None
+
+        # Garante que private_key esteja formatada corretamente (quebras de linha)
+        if 'private_key' in creds_dict:
+            creds_dict['private_key'] = creds_dict['private_key'].replace('\\n', '\n')
+
+        scope = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive"
+        ]
+        
+        # Usa google.oauth2.service_account (MODERNO)
+        # Esta classe EXIGE um dicionário, e agora garantimos que temos um.
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
+        return gspread.authorize(creds)
+
     except Exception as e:
-        st.error(f"Erro de Autenticação: {e}")
+        # Mostra o erro real para debug se necessário, mas evita travar o app
+        st.error(f"Erro Crítico na Autenticação: {str(e)}")
         return None
 
 def salvar_dados_sheets(df_novos_dados):
