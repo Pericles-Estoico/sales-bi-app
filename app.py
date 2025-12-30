@@ -13,11 +13,12 @@ from io import StringIO
 import xlsxwriter
 
 # ==============================================================================
-# VERSÃO V50 - CORREÇÃO CRÍTICA COMPLETA
+# VERSÃO V51 - CORREÇÃO COMPLETA DE UPLOAD
 # ==============================================================================
-# 1. Autenticação blindada contra erros de serialização
-# 2. Salvamento seguro com validação de colunas
-# 3. Preparação automática de dados antes de salvar
+# 1. Autenticação blindada funcionando
+# 2. Salvamento seguro validado
+# 3. Preparação de dados com tratamento de erros robusto
+# 4. Compatível com Python 3.13 e Pandas 2.2+
 # ==============================================================================
 
 st.set_page_config(page_title="Sales BI Pro", page_icon="📊", layout="wide")
@@ -111,7 +112,7 @@ def safe_int(x, default=0):
     except: return default
 
 # ==============================================================================
-# CORREÇÃO 1: AUTENTICAÇÃO BLINDADA
+# AUTENTICAÇÃO BLINDADA
 # ==============================================================================
 def get_gspread_client():
     """
@@ -127,25 +128,21 @@ def get_gspread_client():
         # CONVERSÃO UNIVERSAL PARA DICIONÁRIO PYTHON
         creds_dict = None
         
-        # Caso 1: AttrDict do Streamlit (mais comum)
         if hasattr(creds_input, "_data"):
             creds_dict = dict(creds_input._data)
         elif hasattr(creds_input, "to_dict"):
             creds_dict = creds_input.to_dict()
-        # Caso 2: Dicionário Python
         elif isinstance(creds_input, dict):
-            creds_dict = dict(creds_input)  # Cria cópia limpa
-        # Caso 3: String JSON
+            creds_dict = dict(creds_input)
         elif isinstance(creds_input, str):
             creds_dict = json.loads(creds_input.strip())
         else:
             st.error(f"❌ Formato de credenciais inválido: {type(creds_input)}")
             return None
 
-        # NORMALIZAÇÃO DO PRIVATE_KEY (crítico!)
+        # NORMALIZAÇÃO DO PRIVATE_KEY
         if 'private_key' in creds_dict:
             pk = creds_dict['private_key']
-            # Remove escapes duplicados e garante quebras de linha corretas
             pk = pk.replace('\\\\n', '\n').replace('\\n', '\n')
             creds_dict['private_key'] = pk
 
@@ -167,7 +164,7 @@ def get_gspread_client():
         
         # TESTE DE CONEXÃO
         try:
-            client.openall()  # Testa se consegue listar planilhas
+            client.openall()
             return client
         except Exception as e:
             st.error(f"❌ Autenticação OK, mas sem permissão: {str(e)}")
@@ -182,7 +179,7 @@ def get_gspread_client():
         return None
 
 # ==============================================================================
-# CORREÇÃO 2: SALVAMENTO SEGURO
+# SALVAMENTO SEGURO
 # ==============================================================================
 def salvar_dados_sheets(df_novos_dados):
     """
@@ -197,7 +194,6 @@ def salvar_dados_sheets(df_novos_dados):
         sheet_id = "1qoUk6AsNXLpHyzRrZplM4F5573zN9hUwQTNVUF3UC8E"
         sh = client.open_by_key(sheet_id)
         
-        # Tenta acessar a aba '6. Detalhes'
         try:
             worksheet = sh.worksheet("6. Detalhes")
         except gspread.exceptions.WorksheetNotFound:
@@ -205,9 +201,8 @@ def salvar_dados_sheets(df_novos_dados):
             return False
         
         # GARANTE QUE AS COLUNAS ESTEJAM NA ORDEM CERTA
-        colunas_planilha = worksheet.row_values(1)  # Lê o header da planilha
+        colunas_planilha = worksheet.row_values(1)
         
-        # Se a planilha estiver vazia, adiciona o header
         if not colunas_planilha:
             worksheet.append_row(COLUNAS_ESPERADAS)
             colunas_planilha = COLUNAS_ESPERADAS
@@ -218,16 +213,14 @@ def salvar_dados_sheets(df_novos_dados):
             if col in df_novos_dados.columns:
                 df_preparado[col] = df_novos_dados[col]
             else:
-                df_preparado[col] = ""  # Preenche colunas faltantes com vazio
+                df_preparado[col] = ""
         
-        # CONVERTE PARA FORMATO COMPATÍVEL (strings e números)
+        # CONVERTE PARA FORMATO COMPATÍVEL
         df_preparado = df_preparado.fillna("")
         df_preparado = df_preparado.astype(str)
         
-        # Converte para lista de listas
         dados_lista = df_preparado.values.tolist()
         
-        # SALVA EM LOTE (mais eficiente)
         if dados_lista:
             worksheet.append_rows(dados_lista, value_input_option='USER_ENTERED')
             st.success(f"✅ {len(dados_lista)} registros salvos com sucesso!")
@@ -245,44 +238,85 @@ def salvar_dados_sheets(df_novos_dados):
         return False
 
 # ==============================================================================
-# CORREÇÃO 3: PREPARAÇÃO DE DADOS
+# PREPARAÇÃO DE DADOS (CORRIGIDA E ROBUSTA)
 # ==============================================================================
 def preparar_dados_para_salvar(df_raw, canal, cnpj, data_venda):
     """
     Garante que o DataFrame tenha TODAS as colunas esperadas antes de salvar.
+    VERSÃO CORRIGIDA com tratamento de erros robusto.
     """
-    df_prep = df_raw.copy()
-    
-    # Adiciona colunas obrigatórias se não existirem
-    df_prep['Data'] = data_venda.strftime("%Y-%m-%d")
-    df_prep['Canal'] = CHANNELS[canal]
-    df_prep['CNPJ'] = cnpj
-    
-    # Preenche colunas financeiras faltantes com 0
-    colunas_financeiras = [
-        'Tipo', 'Custo Produto', 'Impostos', 'Comissão', 
-        'Taxas Fixas', 'Embalagem', 'Investimento Ads', 
-        'Custo Total', 'Lucro Bruto', 'Margem (%)'
-    ]
-    
-    for col in colunas_financeiras:
-        if col not in df_prep.columns:
-            if col == 'Tipo':
-                df_prep[col] = 'Venda'
-            elif col == 'Margem (%)':
-                df_prep[col] = '0%'
-            else:
-                df_prep[col] = 0.0
-    
-    # Garante ordem das colunas
-    df_final = pd.DataFrame()
-    for col in COLUNAS_ESPERADAS:
-        if col in df_prep.columns:
-            df_final[col] = df_prep[col]
+    try:
+        df_prep = df_raw.copy()
+        
+        # Validação básica
+        if df_prep.empty:
+            st.error("❌ DataFrame vazio!")
+            return pd.DataFrame()
+        
+        # Adiciona colunas obrigatórias
+        df_prep['Data'] = data_venda.strftime("%Y-%m-%d")
+        df_prep['Canal'] = CHANNELS.get(canal, canal)
+        df_prep['CNPJ'] = cnpj
+        
+        # Valida colunas essenciais
+        if 'Produto' not in df_prep.columns:
+            st.error("❌ Coluna 'Produto' não encontrada!")
+            st.info(f"Colunas encontradas: {', '.join(df_prep.columns)}")
+            return pd.DataFrame()
+        
+        if 'Quantidade' not in df_prep.columns:
+            st.error("❌ Coluna 'Quantidade' não encontrada!")
+            st.info(f"Colunas encontradas: {', '.join(df_prep.columns)}")
+            return pd.DataFrame()
+        
+        # Garante que Quantidade seja numérica
+        df_prep['Quantidade'] = pd.to_numeric(df_prep['Quantidade'], errors='coerce').fillna(0).astype(int)
+        
+        # Se Total Venda não existir, cria com valor padrão
+        if 'Total Venda' not in df_prep.columns:
+            st.warning("⚠️ Coluna 'Total Venda' não encontrada. Usando valor estimado.")
+            df_prep['Total Venda'] = df_prep['Quantidade'] * 50.0
         else:
-            df_final[col] = ""
-    
-    return df_final
+            df_prep['Total Venda'] = pd.to_numeric(df_prep['Total Venda'], errors='coerce').fillna(0.0)
+        
+        # Preenche colunas financeiras faltantes
+        colunas_financeiras = {
+            'Tipo': 'Venda',
+            'Custo Produto': 0.0,
+            'Impostos': 0.0,
+            'Comissão': 0.0,
+            'Taxas Fixas': 0.0,
+            'Embalagem': 0.0,
+            'Investimento Ads': 0.0,
+            'Custo Total': 0.0,
+            'Lucro Bruto': 0.0,
+            'Margem (%)': 0.0
+        }
+        
+        for col, valor_padrao in colunas_financeiras.items():
+            if col not in df_prep.columns:
+                df_prep[col] = valor_padrao
+        
+        # Garante ordem das colunas conforme esperado
+        df_final = pd.DataFrame()
+        for col in COLUNAS_ESPERADAS:
+            if col in df_prep.columns:
+                df_final[col] = df_prep[col]
+            else:
+                df_final[col] = ""
+        
+        # Validação final
+        if df_final.empty:
+            st.error("❌ Nenhum dado válido após processamento!")
+            return pd.DataFrame()
+        
+        st.success(f"✅ {len(df_final)} linhas preparadas com sucesso!")
+        return df_final
+        
+    except Exception as e:
+        st.error(f"❌ Erro ao preparar dados: {str(e)}")
+        st.info("💡 Verifique se o arquivo Excel está formatado corretamente.")
+        return pd.DataFrame()
 
 # ==============================================================================
 # CARREGAMENTO DE DADOS
@@ -294,7 +328,6 @@ def carregar_dados_historicos():
         r.raise_for_status()
         df = pd.read_csv(StringIO(r.text))
         
-        # Limpeza básica para garantir compatibilidade
         if 'Total Venda' in df.columns:
             df['Total Venda'] = df['Total Venda'].apply(clean_currency)
         if 'Quantidade' in df.columns:
@@ -306,7 +339,7 @@ def carregar_dados_historicos():
             
         return df
     except Exception as e:
-        st.error(f"Erro ao carregar dados históricos da BCG: {e}")
+        st.error(f"Erro ao carregar dados históricos: {e}")
         return pd.DataFrame()
 
 # ==============================================================================
@@ -341,7 +374,7 @@ st.sidebar.checkbox(
 if st.session_state.sandbox_mode:
     st.sidebar.warning("⚠️ MODO SIMULAÇÃO ATIVO: Nenhuma alteração será salva!")
 
-# Carregamento Automático de Dados Históricos
+# Carregamento Automático
 if 'processed_data' not in st.session_state:
     with st.spinner("Carregando dados históricos..."):
         df_historico = carregar_dados_historicos()
@@ -349,9 +382,8 @@ if 'processed_data' not in st.session_state:
             st.session_state.processed_data = df_historico
             st.toast("Dados históricos carregados com sucesso!", icon="✅")
         else:
-            st.toast("Nenhum dado histórico encontrado ou erro na conexão.", icon="⚠️")
+            st.toast("Nenhum dado histórico encontrado.", icon="⚠️")
 
-# Exibir contagem de registros carregados
 if 'processed_data' in st.session_state:
     st.sidebar.info(f"📊 Registros Carregados: {len(st.session_state.processed_data)}")
 
@@ -376,11 +408,14 @@ if uploaded_file:
     try:
         df = pd.read_excel(uploaded_file)
         
+        st.info(f"📄 Arquivo carregado: {len(df)} linhas")
+        st.info(f"📋 Colunas encontradas: {', '.join(df.columns)}")
+        
         # Normalização de colunas
         cols_map = {c: normalizar(c) for c in df.columns}
-        col_produto = next((k for k, v in cols_map.items() if 'produto' in v or 'descricao' in v or 'codigo' in v), None)
-        col_qtd = next((k for k, v in cols_map.items() if 'quantidade' in v or 'qtd' in v), None)
-        col_valor = next((k for k, v in cols_map.items() if 'valor' in v or 'total' in v), None)
+        col_produto = next((k for k, v in cols_map.items() if 'produto' in v or 'descricao' in v or 'codigo' in v or 'item' in v), None)
+        col_qtd = next((k for k, v in cols_map.items() if 'quantidade' in v or 'qtd' in v or 'qtde' in v), None)
+        col_valor = next((k for k, v in cols_map.items() if 'valor' in v or 'total' in v or 'preco' in v), None)
 
         if col_produto and col_qtd:
             rename_dict = {col_produto: 'Produto', col_qtd: 'Quantidade'}
@@ -394,66 +429,67 @@ if uploaded_file:
             if 'Total Venda' in df.columns:
                 df['Total Venda'] = pd.to_numeric(df['Total Venda'], errors='coerce').fillna(0.0)
             
-            # Botão de Processamento (Texto Dinâmico)
             btn_label = "🧪 Simular (Teste)" if st.session_state.sandbox_mode else "🔍 Pré-visualizar Importação"
             
             if st.sidebar.button(btn_label):
-                # APLICA A PREPARAÇÃO DE DADOS (CORREÇÃO CRÍTICA)
-                df_preparado = preparar_dados_para_salvar(df, canal, cnpj, data_venda)
+                with st.spinner("Processando dados..."):
+                    df_preparado = preparar_dados_para_salvar(df, canal, cnpj, data_venda)
+                    
+                    if not df_preparado.empty:
+                        if 'processed_data' in st.session_state:
+                            df_final = pd.concat([st.session_state.processed_data, df_preparado], ignore_index=True)
+                        else:
+                            df_final = df_preparado
+                        
+                        st.session_state.processed_data = df_final
+                        st.session_state.novos_dados_temp = df_preparado
+                        
+                        if st.session_state.sandbox_mode:
+                            st.success(f"🧪 TESTE: {len(df_preparado)} vendas simuladas. Nada será salvo.")
+                        else:
+                            st.info(f"📋 PRÉ-VISUALIZAÇÃO: {len(df_preparado)} vendas prontas para importar.")
+                        
+                        st.markdown("### 📊 Dados Preparados")
+                        st.dataframe(df_preparado, use_container_width=True)
+                    else:
+                        st.error("❌ Falha ao preparar dados. Verifique o arquivo.")
                 
-                # Mesclar com dados existentes se houver
-                if 'processed_data' in st.session_state:
-                    df_final = pd.concat([st.session_state.processed_data, df_preparado], ignore_index=True)
-                else:
-                    df_final = df_preparado
-                
-                st.session_state.processed_data = df_final
-                st.session_state.novos_dados_temp = df_preparado  # Salva dados PREPARADOS
-                
-                if st.session_state.sandbox_mode:
-                    st.success(f"TESTE: {len(df_preparado)} vendas simuladas na memória. Nada será salvo.")
-                    st.markdown("### 🧪 Dados Simulados")
-                    st.dataframe(df_preparado, use_container_width=True)
-                else:
-                    st.info(f"PRÉ-VISUALIZAÇÃO: {len(df_preparado)} vendas prontas para importar. Confira os dados e use o botão abaixo para SALVAR.")
-                    st.markdown("### 📋 Dados Prontos para Importação")
-                    st.dataframe(df_preparado, use_container_width=True)
-                
-            # Botão de Gravação Real com Trava de Segurança
             if 'novos_dados_temp' in st.session_state and not st.session_state.sandbox_mode:
                 st.sidebar.divider()
                 st.sidebar.markdown("### 🔒 Finalização")
                 
-                # Checkbox de Confirmação
                 confirmacao = st.sidebar.checkbox(
-                    "✅ Confirmo que analisei a simulação e os dados estão corretos.",
+                    "✅ Confirmo que os dados estão corretos.",
                     key="check_confirmacao"
                 )
                 
                 if confirmacao:
                     st.sidebar.warning("⚠️ Atenção: Esta ação é irreversível!")
-                    if st.sidebar.button("💾 SALVAR DADOS NA PLANILHA (OFICIAL)", type="primary"):
-                        with st.spinner("Salvando dados no Google Sheets..."):
+                    if st.sidebar.button("💾 SALVAR DADOS NA PLANILHA", type="primary"):
+                        with st.spinner("Salvando no Google Sheets..."):
                             sucesso = salvar_dados_sheets(st.session_state.novos_dados_temp)
                             if sucesso:
-                                st.success("✅ Dados salvos com sucesso na planilha Google Sheets!")
+                                st.success("✅ Dados salvos com sucesso!")
                                 del st.session_state.novos_dados_temp
                                 time.sleep(2)
                                 st.cache_data.clear()
                                 st.rerun()
                             else:
-                                st.error("❌ Falha ao salvar dados. Verifique as permissões ou a conexão.")
+                                st.error("❌ Falha ao salvar. Verifique permissões.")
                 else:
-                    st.sidebar.info("👆 Marque a caixa acima para liberar o salvamento.")
+                    st.sidebar.info("👆 Marque a caixa para liberar o salvamento.")
 
         else:
-            st.error("Colunas 'Produto' e 'Quantidade' não encontradas no Excel.")
+            st.error("❌ Colunas 'Produto' e 'Quantidade' não encontradas!")
+            st.info(f"📋 Colunas disponíveis: {', '.join(df.columns)}")
+            st.info("💡 Renomeie as colunas no Excel para 'Produto' e 'Quantidade'")
             
     except Exception as e:
-        st.error(f"Erro ao ler arquivo: {e}")
+        st.error(f"❌ Erro ao ler arquivo: {str(e)}")
+        st.info("💡 Verifique se o arquivo é um Excel válido (.xlsx ou .xls)")
 
 # ==============================================================================
-# DASHBOARD E VISUALIZAÇÃO
+# DASHBOARD
 # ==============================================================================
 st.title("📊 Sales BI Pro")
 
@@ -465,7 +501,6 @@ tabs = st.tabs([
 if 'processed_data' in st.session_state:
     df_vendas = st.session_state.processed_data
     
-    # Cálculos básicos para o Dashboard
     if 'Total Venda' in df_vendas.columns:
         total_vendas = df_vendas['Total Venda'].sum()
     else:
@@ -473,12 +508,11 @@ if 'processed_data' in st.session_state:
         
     ticket_medio = total_vendas / len(df_vendas) if len(df_vendas) > 0 else 0
     
-    # Margem Média
     margem_media = 0
     if 'Margem (%)' in df_vendas.columns:
         margem_media = df_vendas['Margem (%)'].mean()
     
-    with tabs[0]:  # Visão Geral
+    with tabs[0]:
         c1, c2, c3 = st.columns(3)
         c1.metric("Vendas Totais", format_currency_br(total_vendas))
         c2.metric("Margem Média", format_percent_br(margem_media))
@@ -488,7 +522,7 @@ if 'processed_data' in st.session_state:
             st.subheader("Vendas por Canal")
             st.bar_chart(df_vendas.groupby('Canal')['Quantidade'].sum())
 
-    with tabs[1]:  # Por CNPJ
+    with tabs[1]:
         if 'CNPJ' in df_vendas.columns:
             st.subheader("Análise por CNPJ")
             df_cnpj = df_vendas.groupby('CNPJ').agg({
@@ -496,11 +530,11 @@ if 'processed_data' in st.session_state:
                 'Quantidade': 'sum',
                 'Lucro Bruto': 'sum'
             }).reset_index()
-            st.dataframe(df_cnpj.style.format({'Total Venda': 'R$ {:,.2f}', 'Lucro Bruto': 'R$ {:,.2f}'}), use_container_width=True)
+            st.dataframe(df_cnpj, use_container_width=True)
         else:
-            st.info("Coluna 'CNPJ' não encontrada nos dados.")
+            st.info("Coluna 'CNPJ' não encontrada.")
 
-    with tabs[2]:  # BCG Geral
+    with tabs[2]:
         st.subheader("Matriz BCG Geral")
         if 'Quantidade' in df_vendas.columns and 'Margem (%)' in df_vendas.columns:
             df_bcg = df_vendas.groupby('Produto').agg({
@@ -520,19 +554,12 @@ if 'processed_data' in st.session_state:
             
             df_bcg['Classificação'] = df_bcg.apply(classificar_bcg, axis=1)
             
-            st.scatter_chart(
-                df_bcg,
-                x='Margem (%)',
-                y='Quantidade',
-                color='Classificação',
-                size='Total Venda'
-            )
-            
+            st.scatter_chart(df_bcg, x='Margem (%)', y='Quantidade', color='Classificação', size='Total Venda')
             st.dataframe(df_bcg, use_container_width=True)
         else:
-            st.info("Dados insuficientes para BCG (precisa de Quantidade e Margem).")
+            st.info("Dados insuficientes para BCG.")
 
-    with tabs[3]:  # BCG por Canal
+    with tabs[3]:
         st.subheader("BCG por Canal")
         if 'Canal' in df_vendas.columns:
             canal_sel = st.selectbox("Selecione o Canal", df_vendas['Canal'].unique())
@@ -556,20 +583,14 @@ if 'processed_data' in st.session_state:
                 
                 df_bcg_canal['Classificação'] = df_bcg_canal.apply(classificar_bcg_canal, axis=1)
                 
-                st.scatter_chart(
-                    df_bcg_canal,
-                    x='Margem (%)',
-                    y='Quantidade',
-                    color='Classificação',
-                    size='Total Venda'
-                )
+                st.scatter_chart(df_bcg_canal, x='Margem (%)', y='Quantidade', color='Classificação', size='Total Venda')
                 st.dataframe(df_bcg_canal, use_container_width=True)
             else:
-                st.warning("Sem dados suficientes para este canal.")
+                st.warning("Sem dados suficientes.")
         else:
             st.info("Coluna 'Canal' não encontrada.")
 
-    with tabs[4]:  # Preços
+    with tabs[4]:
         st.subheader("Análise de Preços")
         if 'Total Venda' in df_vendas.columns and 'Quantidade' in df_vendas.columns:
             df_vendas['Preço Médio'] = df_vendas['Total Venda'] / df_vendas['Quantidade']
@@ -577,11 +598,11 @@ if 'processed_data' in st.session_state:
         else:
             st.info("Dados de preço indisponíveis.")
 
-    with tabs[5]:  # Detalhes
+    with tabs[5]:
         st.subheader("Base de Dados Completa")
         st.dataframe(df_vendas, use_container_width=True)
 
-    with tabs[6]:  # Giro
+    with tabs[6]:
         st.subheader("Giro de Produtos")
         if 'Quantidade' in df_vendas.columns:
             top_giro = df_vendas.groupby('Produto')['Quantidade'].sum().sort_values(ascending=False).head(20)
@@ -589,9 +610,8 @@ if 'processed_data' in st.session_state:
         else:
             st.info("Dados de quantidade indisponíveis.")
 
-    with tabs[7]:  # Oportunidades
+    with tabs[7]:
         st.subheader("🚀 Oportunidades de Melhoria")
-        st.write("Produtos com alta margem e baixo volume (Interrogação) que podem ser promovidos:")
         if 'Quantidade' in df_vendas.columns and 'Margem (%)' in df_vendas.columns:
             df_bcg_oport = df_vendas.groupby('Produto').agg({
                 'Quantidade': 'sum',
@@ -616,4 +636,4 @@ if 'processed_data' in st.session_state:
 
 else:
     with tabs[0]:
-        st.info("Carregando dados da planilha mestre...")
+        st.info("Carregando dados...")
