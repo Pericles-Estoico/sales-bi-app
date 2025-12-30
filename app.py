@@ -118,12 +118,28 @@ def get_gspread_client():
     try:
         # Tenta carregar secrets do formato TOML (Streamlit Cloud)
         if "GOOGLE_SHEETS_CREDENTIALS" in st.secrets:
-            creds_dict = st.secrets["GOOGLE_SHEETS_CREDENTIALS"]
-            # Se for string, converte para dict
-            if isinstance(creds_dict, str):
-                creds_dict = json.loads(creds_dict)
+            # Pega o objeto direto dos secrets
+            creds_data = st.secrets["GOOGLE_SHEETS_CREDENTIALS"]
+            
+            # BLINDAGEM: Garante que seja um dicionário Python puro
+            if isinstance(creds_data, str):
+                try:
+                    creds_dict = json.loads(creds_data)
+                except json.JSONDecodeError:
+                    # Se falhar o json.loads, pode ser que o streamlit já tenha entregue um objeto AttrDict que parece string
+                    # Vamos tentar converter para dict forçadamente se for um objeto do streamlit
+                    creds_dict = dict(creds_data)
+            elif hasattr(creds_data, 'to_dict'):
+                creds_dict = creds_data.to_dict()
+            elif isinstance(creds_data, dict):
+                creds_dict = creds_data
+            else:
+                # Tenta converter qualquer outra coisa (AttrDict, etc) para dict padrão
+                creds_dict = dict(creds_data)
             
             scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+            
+            # Usa from_service_account_info em vez de from_json_keyfile_dict para evitar confusão de leitura de arquivo
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
             return gspread.authorize(creds)
         else:
