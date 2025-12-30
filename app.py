@@ -13,11 +13,12 @@ from io import StringIO
 import xlsxwriter
 
 # ==============================================================================
-# VERSÃO V49 - CLEAN (RESTAURADA)
+# VERSÃO V49 - CLEAN (CORREÇÃO CRÍTICA DE AUTENTICAÇÃO)
 # ==============================================================================
 # 1. Funcionalidades originais da v49
 # 2. Sem integração com template_estoque
 # 3. Sem arquivos lixo
+# 4. CORREÇÃO: Tratamento robusto de credenciais para evitar erro 'seekable bit stream'
 # ==============================================================================
 
 st.set_page_config(page_title="Sales BI Pro", page_icon="📊", layout="wide")
@@ -123,28 +124,29 @@ def get_gspread_client():
         creds_input = st.secrets["GOOGLE_SHEETS_CREDENTIALS"]
         
         # BLINDAGEM DE TIPO: Converte qualquer entrada para dicionário Python puro
-        if isinstance(creds_input, str):
-            # Se for string, tenta decodificar JSON
-            try:
-                creds_dict = json.loads(creds_input)
-            except json.JSONDecodeError:
-                # Se falhar, assume que é um objeto AttrDict do Streamlit convertido para string errada
-                # Tenta acessar como objeto direto se possível, ou falha com erro claro
-                st.error("Erro: As credenciais estão como string mas não são um JSON válido.")
-                return None
-        elif hasattr(creds_input, "to_dict"):
-            # Se for objeto do Streamlit (AttrDict), converte para dict
+        creds_dict = None
+        
+        # Caso 1: É um objeto AttrDict do Streamlit (comportamento padrão do st.secrets)
+        if hasattr(creds_input, "to_dict"):
             creds_dict = creds_input.to_dict()
+            
+        # Caso 2: É um dicionário Python padrão
         elif isinstance(creds_input, dict):
-            # Se já for dict, usa direto
             creds_dict = creds_input
-        else:
-            # Tenta conversão forçada para dict
+            
+        # Caso 3: É uma string (JSON stringificado)
+        elif isinstance(creds_input, str):
             try:
-                creds_dict = dict(creds_input)
-            except:
-                st.error(f"Erro: Formato de credenciais desconhecido ({type(creds_input)}).")
+                # Tenta limpar caracteres invisíveis que podem quebrar o JSON
+                clean_json = creds_input.strip()
+                creds_dict = json.loads(clean_json)
+            except json.JSONDecodeError as e:
+                st.error(f"Erro ao decodificar JSON das credenciais: {e}")
                 return None
+        
+        if creds_dict is None:
+            st.error(f"Formato de credenciais não suportado: {type(creds_input)}")
+            return None
 
         # Garante que private_key esteja formatada corretamente (quebras de linha)
         if 'private_key' in creds_dict:
@@ -259,7 +261,6 @@ formato = st.sidebar.radio("Formato", ["Bling", "Padrão"], index=0)
 canal = st.sidebar.selectbox("Canal", list(CHANNELS.keys()), format_func=lambda x: CHANNELS[x])
 cnpj = st.sidebar.selectbox("CNPJ/Regime", ["Simples Nacional", "Lucro Presumido"])
 data_venda = st.sidebar.date_input("Data", datetime.now())
-ads = st.sidebar.number_input("Ads (R$)", min_value=0.0, step=10.0)
 
 uploaded_file = st.sidebar.file_uploader("Arquivo Excel", type=["xlsx", "xls"])
 
