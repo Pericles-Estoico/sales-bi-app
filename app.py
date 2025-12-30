@@ -112,8 +112,54 @@ def safe_int(x, default=0):
     except: return default
 
 # ==============================================================================
-# FUNÇÃO DE CARREGAMENTO DE DADOS
+# FUNÇÕES DE DADOS (CARREGAMENTO E SALVAMENTO)
 # ==============================================================================
+def get_gspread_client():
+    try:
+        # Tenta carregar secrets do formato TOML (Streamlit Cloud)
+        if "GOOGLE_SHEETS_CREDENTIALS" in st.secrets:
+            creds_dict = st.secrets["GOOGLE_SHEETS_CREDENTIALS"]
+            # Se for string, converte para dict
+            if isinstance(creds_dict, str):
+                creds_dict = json.loads(creds_dict)
+            
+            scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+            return gspread.authorize(creds)
+        else:
+            st.error("Credenciais do Google Sheets não encontradas nos secrets.")
+            return None
+    except Exception as e:
+        st.error(f"Erro na autenticação do Google Sheets: {e}")
+        return None
+
+def salvar_dados_sheets(df_novos_dados):
+    client = get_gspread_client()
+    if not client: return False
+    
+    try:
+        # Extrai o ID da planilha da URL
+        sheet_id = "1qoUk6AsNXLpHyzRrZplM4F5573zN9hUwQTNVUF3UC8E" # ID fixo da planilha mestre
+        sh = client.open_by_key(sheet_id)
+        
+        # Tenta acessar a aba '6. Detalhes' (onde ficam os dados brutos)
+        try:
+            worksheet = sh.worksheet("6. Detalhes")
+        except:
+            # Se não achar pelo nome, tenta a primeira aba ou cria uma nova
+            worksheet = sh.sheet1
+            
+        # Prepara os dados para envio (converte para lista de listas)
+        # Garante que as colunas estejam na ordem certa se necessário, ou apenas append
+        dados_lista = df_novos_dados.values.tolist()
+        
+        # Adiciona as linhas no final da planilha
+        worksheet.append_rows(dados_lista)
+        return True
+    except Exception as e:
+        st.error(f"Erro ao salvar no Google Sheets: {e}")
+        return False
+
 @st.cache_data(ttl=300)
 def carregar_dados_historicos():
     try:
@@ -213,8 +259,10 @@ if uploaded_file:
             
             df['Canal'] = CHANNELS[canal]
             
-            # Botão de Simulação
-            if st.sidebar.button("🚀 Simular Processamento"):
+            # Botão de Processamento (Texto Dinâmico)
+            btn_label = "🧪 Simular (Teste)" if st.session_state.sandbox_mode else "🔍 Pré-visualizar Importação"
+            
+            if st.sidebar.button(btn_label):
                 # Mesclar com dados existentes se houver
                 if 'processed_data' in st.session_state:
                     df_final = pd.concat([st.session_state.processed_data, df], ignore_index=True)
@@ -222,8 +270,40 @@ if uploaded_file:
                     df_final = df
                 
                 st.session_state.processed_data = df_final
-                st.success(f"SIMULAÇÃO: {len(df)} novas vendas adicionadas na memória. Nada foi salvo.")
+                st.session_state.novos_dados_temp = df # Guarda apenas os novos dados para salvar depois
                 
+                if st.session_state.sandbox_mode:
+                    st.success(f"TESTE: {len(df)} vendas simuladas na memória. Nada será salvo.")
+                else:
+                    st.info(f"PRÉ-VISUALIZAÇÃO: {len(df)} vendas prontas para importar. Confira os dados e use o botão abaixo para SALVAR.")
+                
+            # Botão de Gravação Real com Trava de Segurança
+            if 'novos_dados_temp' in st.session_state and not st.session_state.sandbox_mode:
+                st.sidebar.divider()
+                st.sidebar.markdown("### 🔒 Finalização")
+                
+                # Checkbox de Confirmação
+                confirmacao = st.sidebar.checkbox(
+                    "✅ Confirmo que analisei a simulação e os dados estão corretos.",
+                    key="check_confirmacao"
+                )
+                
+                if confirmacao:
+                    st.sidebar.warning("⚠️ Atenção: Esta ação é irreversível!")
+                    if st.sidebar.button("💾 SALVAR DADOS NA PLANILHA (OFICIAL)", type="primary"):
+                        with st.spinner("Salvando dados no Google Sheets..."):
+                            sucesso = salvar_dados_sheets(st.session_state.novos_dados_temp)
+                            if sucesso:
+                                st.success("✅ Dados salvos com sucesso na planilha Google Sheets!")
+                                del st.session_state.novos_dados_temp # Limpa os dados temporários
+                                time.sleep(2)
+                                st.cache_data.clear() # Limpa o cache para recarregar tudo atualizado
+                                st.rerun()
+                            else:
+                                st.error("❌ Falha ao salvar dados. Verifique as permissões ou a conexão.")
+                else:
+                    st.sidebar.info("👆 Marque a caixa acima para liberar o salvamento.")
+
         else:
             st.error("Colunas 'Produto' e 'Quantidade' não encontradas no Excel.")
             
