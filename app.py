@@ -13,20 +13,20 @@ from io import StringIO
 import xlsxwriter
 
 # ==============================================================================
-# VERSÃO V49 - BUGFIX (BASEADA NA V48/V33)
+# VERSÃO V33 - SUPER APP COM MODO SIMULAÇÃO E EXCEL HIERÁRQUICO
 # ==============================================================================
-# 1. CORREÇÃO: Checkbox "Modo Simulação" agora usa key nativa para evitar crash
-# 2. MANTIDO: Toda a lógica de BI, CNPJ, BCG e Preços da V33
-# 3. FONTE DE DADOS: Config_BI_Final_MatrizBCG
+# 1. MODO SIMULAÇÃO GLOBAL: Bloqueia qualquer escrita no Google Sheets/Webhook
+# 2. EXCEL HIERÁRQUICO: Agrupa por Semi (Pai) -> Acabamentos (Filhos)
+# 3. ABAS POR MARKETPLACE: Gera uma aba para cada canal no Excel de Produção
 # ==============================================================================
 
-st.set_page_config(page_title="Sales BI Pro", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Sales BI Pro + MRP Fábrica", page_icon="🏭", layout="wide")
 
 # ==============================================================================
-# CONFIGURAÇÕES
+# CONFIGURAÇÕES DO MÓDULO DE ESTOQUE
 # ==============================================================================
-# URL da planilha Config_BI_Final_MatrizBCG (Aba 6. Detalhes - GID 961459380)
-BCG_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1qoUk6AsNXLpHyzRrZplM4F5573zN9hUwQTNVUF3UC8E/export?format=csv&gid=961459380"
+ESTOQUE_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1PpiMQingHf4llA03BiPIuPJPIZqul4grRU_emWDEK1o/export?format=csv"
+ESTOQUE_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbxTX9uUWnByw6sk6MtuJ5FbjV7zeBKYEoUPPlUlUDS738QqocfCd_NAlh9Eh25XhQywTw/exec"
 
 # ==============================================================================
 # CONSTANTES E MAPEAMENTOS
@@ -111,264 +111,832 @@ def safe_int(x, default=0):
         return int(float(str(x).replace(",", ".")))
     except: return default
 
+def parse_int_list(value):
+    if value is None: return []
+    if isinstance(value, float) and math.isnan(value): return []
+    parts = [p.strip() for p in str(value).split(",")]
+    out = []
+    for p in parts:
+        if not p: continue
+        v = safe_int(p, None)
+        if v is not None: out.append(v)
+    return out
+
 # ==============================================================================
-# FUNÇÃO DE CARREGAMENTO DE DADOS
+# FUNÇÕES DE ESTOQUE E MRP
 # ==============================================================================
-@st.cache_data(ttl=300)
-def carregar_dados_historicos():
+@st.cache_data(ttl=60)
+def carregar_estoque_externo():
     try:
-        r = requests.get(BCG_SHEETS_URL, timeout=15)
+        r = requests.get(ESTOQUE_SHEETS_URL, timeout=15)
         r.raise_for_status()
         df = pd.read_csv(StringIO(r.text))
         
-        # Limpeza básica para garantir compatibilidade
-        if 'Total Venda' in df.columns:
-            df['Total Venda'] = df['Total Venda'].apply(clean_currency)
-        if 'Quantidade' in df.columns:
-            df['Quantidade'] = pd.to_numeric(df['Quantidade'], errors='coerce').fillna(0).astype(int)
-        if 'Margem (%)' in df.columns:
-            df['Margem (%)'] = df['Margem (%)'].apply(clean_percent_read)
-        if 'Lucro Bruto' in df.columns:
-            df['Lucro Bruto'] = df['Lucro Bruto'].apply(clean_currency)
+        req = ['codigo', 'nome', 'categoria', 'estoque_atual', 'estoque_min', 'estoque_max']
+        for c in req:
+            if c not in df.columns: df[c] = 0
             
+        df['estoque_atual'] = pd.to_numeric(df['estoque_atual'], errors='coerce').fillna(0)
+        
+        for c in ['componentes', 'quantidades', 'eh_kit']:
+            if c not in df.columns: df[c] = ''
+            else: df[c] = df[c].astype(str).fillna('')
+            
+        df['codigo_key'] = df['codigo'].astype(str).map(normalize_key)
         return df
     except Exception as e:
-        st.error(f"Erro ao carregar dados históricos da BCG: {e}")
+        st.error(f"Erro ao carregar estoque externo: {e}")
         return pd.DataFrame()
 
-# ==============================================================================
-# INTERFACE PRINCIPAL
-# ==============================================================================
-st.sidebar.title("🔧 Status da Conexão")
+def calcular_mrp_recursivo(codigo_key, qtd_necessaria, df_estoque, nivel=0, caminho=""):
+    acoes = []
+    produto = df_estoque[df_estoque['codigo_key'] == codigo_key]
+    if produto.empty:
+        acoes.append({
+            'nivel': nivel, 'codigo': codigo_key, 'nome': f"PRODUTO NÃO ENCONTRADO ({codigo_key})",
+            'acao': 'ERRO_CADASTRO', 'qtd': qtd_necessaria, 'estoque_atual': 0, 'caminho': caminho
+        })
+        return acoes
 
-# MODO SIMULAÇÃO (SANDBOX) - CORREÇÃO DE BUG
-# Usamos st.session_state.get para inicializar, mas o controle é feito pelo key do widget
-if 'sandbox_mode' not in st.session_state:
-    st.session_state.sandbox_mode = False
-
-# O widget checkbox atualiza diretamente o session_state['sandbox_mode']
-st.sidebar.checkbox(
-    "🧪 MODO SIMULAÇÃO (Sandbox)", 
-    key="sandbox_mode",
-    help="Ative para testar sem salvar dados reais."
-)
-
-if st.session_state.sandbox_mode:
-    st.sidebar.warning("⚠️ MODO SIMULAÇÃO ATIVO: Nenhuma alteração será salva!")
-
-# Carregamento Automático de Dados Históricos
-if 'processed_data' not in st.session_state:
-    with st.spinner("Carregando dados históricos..."):
-        df_historico = carregar_dados_historicos()
-        if not df_historico.empty:
-            st.session_state.processed_data = df_historico
-            st.toast("Dados históricos carregados com sucesso!", icon="✅")
-        else:
-            st.toast("Nenhum dado histórico encontrado ou erro na conexão.", icon="⚠️")
-
-# Exibir contagem de registros carregados
-if 'processed_data' in st.session_state:
-    st.sidebar.info(f"📊 Registros Carregados: {len(st.session_state.processed_data)}")
-
-st.sidebar.divider()
-st.sidebar.header("📥 Importar Novas Vendas")
-
-if st.sidebar.button("🔄 Atualizar Dados (Limpar Cache)"):
-    st.cache_data.clear()
-    st.rerun()
-
-formato = st.sidebar.radio("Formato", ["Bling", "Padrão"], index=0)
-canal = st.sidebar.selectbox("Canal", list(CHANNELS.keys()), format_func=lambda x: CHANNELS[x])
-cnpj = st.sidebar.selectbox("CNPJ/Regime", ["Simples Nacional", "Lucro Presumido"])
-data_venda = st.sidebar.date_input("Data", datetime.now())
-ads = st.sidebar.number_input("Ads (R$)", min_value=0.0, step=10.0)
-
-uploaded_file = st.sidebar.file_uploader("Arquivo Excel", type=["xlsx", "xls"])
-
-# ==============================================================================
-# PROCESSAMENTO DE UPLOAD
-# ==============================================================================
-if uploaded_file:
-    try:
-        df = pd.read_excel(uploaded_file)
-        
-        # Normalização de colunas
-        cols_map = {c: normalizar(c) for c in df.columns}
-        col_produto = next((k for k, v in cols_map.items() if 'produto' in v or 'descricao' in v), None)
-        col_qtd = next((k for k, v in cols_map.items() if 'quantidade' in v or 'qtd' in v), None)
-        
-        if col_produto and col_qtd:
-            df = df.rename(columns={col_produto: 'Produto', col_qtd: 'Quantidade'})
-            df['Produto'] = df['Produto'].astype(str).str.strip()
-            df['Quantidade'] = pd.to_numeric(df['Quantidade'], errors='coerce').fillna(1).astype(int)
-            df['Canal'] = CHANNELS[canal]
-            
-            # Botão de Simulação
-            if st.sidebar.button("🚀 Simular Processamento"):
-                # Mesclar com dados existentes se houver
-                if 'processed_data' in st.session_state:
-                    df_final = pd.concat([st.session_state.processed_data, df], ignore_index=True)
-                else:
-                    df_final = df
-                
-                st.session_state.processed_data = df_final
-                st.success(f"SIMULAÇÃO: {len(df)} novas vendas adicionadas na memória. Nada foi salvo.")
-                
-        else:
-            st.error("Colunas 'Produto' e 'Quantidade' não encontradas no Excel.")
-            
-    except Exception as e:
-        st.error(f"Erro ao ler arquivo: {e}")
-
-# ==============================================================================
-# DASHBOARD E VISUALIZAÇÃO
-# ==============================================================================
-st.title("📊 Sales BI Pro")
-
-tabs = st.tabs([
-    "📈 Visão Geral", "🏢 Por CNPJ", "⭐ BCG Geral", "🎯 BCG por Canal", 
-    "💲 Preços", "📝 Detalhes", "🔄 Giro de Produtos", "🚀 Oportunidades"
-])
-
-# Se houver dados processados na memória (Simulação ou Histórico)
-if 'processed_data' in st.session_state:
-    df_vendas = st.session_state.processed_data
+    row = produto.iloc[0]
+    nome = row['nome']
+    estoque_atual = safe_int(row['estoque_atual'])
+    eh_kit = str(row.get('eh_kit', '')).strip().lower() == 'sim'
     
-    # Cálculos básicos para o Dashboard
-    if 'Total Venda' in df_vendas.columns:
-        total_vendas = df_vendas['Total Venda'].sum()
-    else:
-        total_vendas = (df_vendas['Quantidade'] * 50).sum() # Fallback se não tiver coluna de valor
-        
-    ticket_medio = total_vendas / len(df_vendas) if len(df_vendas) > 0 else 0
+    qtd_usar_estoque = min(estoque_atual, qtd_necessaria)
+    qtd_faltante = qtd_necessaria - qtd_usar_estoque
     
-    # Margem Média
-    margem_media = 0
-    if 'Margem (%)' in df_vendas.columns:
-        margem_media = df_vendas['Margem (%)'].mean()
-    
-    with tabs[0]: # Visão Geral
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Vendas Totais", format_currency_br(total_vendas))
-        c2.metric("Margem Média", format_percent_br(margem_media))
-        c3.metric("Ticket Médio", format_currency_br(ticket_medio))
+    if qtd_usar_estoque > 0:
+        acoes.append({
+            'nivel': nivel, 'codigo': row['codigo'], 'nome': nome,
+            'acao': 'SEPARAR_ESTOQUE', 'qtd': qtd_usar_estoque, 'estoque_atual': estoque_atual, 'caminho': caminho
+        })
         
-        if 'Canal' in df_vendas.columns:
-            st.subheader("Vendas por Canal")
-            df_canal_vendas = df_vendas.groupby('Canal')['Quantidade'].sum().reset_index()
-            df_canal_vendas.columns = ['Canal', 'Total Vendido']
-            st.dataframe(df_canal_vendas, use_container_width=True)
-
-    with tabs[1]: # Por CNPJ
-        if 'CNPJ' in df_vendas.columns:
-            st.subheader("Análise por CNPJ")
-            df_cnpj = df_vendas.groupby('CNPJ').agg({
-                'Total Venda': 'sum',
-                'Quantidade': 'sum',
-                'Lucro Bruto': 'sum'
-            }).reset_index()
-            st.dataframe(df_cnpj.style.format({'Total Venda': 'R$ {:,.2f}', 'Lucro Bruto': 'R$ {:,.2f}'}), use_container_width=True)
-        else:
-            st.info("Coluna 'CNPJ' não encontrada nos dados.")
-
-    with tabs[2]: # BCG Geral
-        st.subheader("Matriz BCG Geral")
-        # Simulação simples de BCG baseada em volume e margem (já que não temos crescimento histórico completo)
-        if 'Quantidade' in df_vendas.columns and 'Margem (%)' in df_vendas.columns:
-            df_bcg = df_vendas.groupby('Produto').agg({
-                'Quantidade': 'sum',
-                'Margem (%)': 'mean',
-                'Total Venda': 'sum'
-            }).reset_index()
+    if qtd_faltante > 0:
+        if eh_kit:
+            comps = [normalize_key(c.strip()) for c in str(row.get('componentes', '')).split(',') if c.strip()]
+            quants = parse_int_list(row.get('quantidades', ''))
             
-            # Classificação Simplificada
-            med_qtd = df_bcg['Quantidade'].median()
-            med_margem = df_bcg['Margem (%)'].median()
-            
-            def classificar_bcg(row):
-                if row['Quantidade'] >= med_qtd and row['Margem (%)'] >= med_margem: return 'Estrela ⭐'
-                if row['Quantidade'] >= med_qtd and row['Margem (%)'] < med_margem: return 'Vaca Leiteira 🐄'
-                if row['Quantidade'] < med_qtd and row['Margem (%)'] >= med_margem: return 'Interrogação ❓'
-                return 'Abacaxi 🍍'
-            
-            df_bcg['Classificação'] = df_bcg.apply(classificar_bcg, axis=1)
-            
-            # Tabela BCG ordenada
-            df_bcg_sorted = df_bcg.sort_values('Total Venda', ascending=False)
-            st.dataframe(df_bcg_sorted, use_container_width=True, height=500)
-        else:
-            st.info("Dados insuficientes para BCG (precisa de Quantidade e Margem).")
-
-    with tabs[3]: # BCG por Canal
-        st.subheader("BCG por Canal")
-        if 'Canal' in df_vendas.columns:
-            canal_sel = st.selectbox("Selecione o Canal", df_vendas['Canal'].unique())
-            df_canal = df_vendas[df_vendas['Canal'] == canal_sel]
-            
-            if not df_canal.empty:
-                # Reutiliza lógica BCG para o canal
-                df_bcg_canal = df_canal.groupby('Produto').agg({
-                    'Quantidade': 'sum',
-                    'Margem (%)': 'mean',
-                    'Total Venda': 'sum'
-                }).reset_index()
-                
-                med_qtd_c = df_bcg_canal['Quantidade'].median()
-                med_margem_c = df_bcg_canal['Margem (%)'].median()
-                
-                def classificar_bcg_canal(row):
-                    if row['Quantidade'] >= med_qtd_c and row['Margem (%)'] >= med_margem_c: return 'Estrela ⭐'
-                    if row['Quantidade'] >= med_qtd_c and row['Margem (%)'] < med_margem_c: return 'Vaca Leiteira 🐄'
-                    if row['Quantidade'] < med_qtd_c and row['Margem (%)'] >= med_margem_c: return 'Interrogação ❓'
-                    return 'Abacaxi 🍍'
-                
-                df_bcg_canal['Classificação'] = df_bcg_canal.apply(classificar_bcg_canal, axis=1)
-                
-                # Tabela BCG por Canal ordenada
-                df_bcg_canal_sorted = df_bcg_canal.sort_values('Total Venda', ascending=False)
-                st.dataframe(df_bcg_canal_sorted, use_container_width=True, height=500)
+            if comps and quants and len(comps) == len(quants):
+                acoes.append({
+                    'nivel': nivel, 'codigo': row['codigo'], 'nome': nome,
+                    'acao': 'PRODUZIR_MONTAR', 'qtd': qtd_faltante, 'estoque_atual': estoque_atual, 'caminho': caminho
+                })
+                for comp_key, comp_qtd_unit in zip(comps, quants):
+                    qtd_comp_total = qtd_faltante * comp_qtd_unit
+                    novo_caminho = f"{caminho} > {nome}" if caminho else nome
+                    acoes_filho = calcular_mrp_recursivo(comp_key, qtd_comp_total, df_estoque, nivel + 1, novo_caminho)
+                    acoes.extend(acoes_filho)
             else:
-                st.warning("Sem dados para este canal.")
+                acoes.append({
+                    'nivel': nivel, 'codigo': row['codigo'], 'nome': nome,
+                    'acao': 'ERRO_RECEITA', 'qtd': qtd_faltante, 'estoque_atual': estoque_atual, 'caminho': caminho
+                })
         else:
-            st.info("Coluna 'Canal' não encontrada.")
+            acoes.append({
+                'nivel': nivel, 'codigo': row['codigo'], 'nome': nome,
+                'acao': 'COMPRAR_PRODUZIR_EXTERNO', 'qtd': qtd_faltante, 'estoque_atual': estoque_atual, 'caminho': caminho
+            })
+    return acoes
 
-    with tabs[4]: # Preços
-        st.subheader("Análise de Preços")
-        if 'Total Venda' in df_vendas.columns and 'Quantidade' in df_vendas.columns:
-            df_precos = df_vendas.groupby('Produto').agg({
-                'Total Venda': 'sum',
-                'Quantidade': 'sum'
-            }).reset_index()
-            df_precos['Preço Médio'] = df_precos['Total Venda'] / df_precos['Quantidade']
-            df_precos_sorted = df_precos.sort_values('Preço Médio', ascending=False)
-            st.dataframe(df_precos_sorted, use_container_width=True, height=500)
+def processar_mrp_fila(df_vendas_fila, df_estoque):
+    vendas_agrupadas = df_vendas_fila.groupby('Produto')['Quantidade'].sum().reset_index()
+    plano_mrp = []
+    for _, row in vendas_agrupadas.iterrows():
+        cod_key = normalize_key(row['Produto'])
+        qtd = safe_int(row['Quantidade'])
+        acoes = calcular_mrp_recursivo(cod_key, qtd, df_estoque)
+        plano_mrp.extend(acoes)
+    return pd.DataFrame(plano_mrp)
+
+# ==============================================================================
+# GERAÇÃO DE EXCEL HIERÁRQUICO (ÁRVORE DE SEMIS)
+# ==============================================================================
+def gerar_excel_hierarquico(df_vendas_fila, df_estoque):
+    """
+    Gera um Excel com abas por Marketplace.
+    Em cada aba, agrupa os produtos pelo seu 'Semi' (Pai).
+    """
+    output = io.BytesIO()
+    workbook = xlsxwriter.Workbook(output, {'in_memory': True})
+    
+    # Formatos
+    fmt_header = workbook.add_format({'bold': True, 'bg_color': '#D9EAD3', 'border': 1})
+    fmt_pai = workbook.add_format({'bold': True, 'bg_color': '#EFEFEF', 'border': 1})
+    fmt_filho = workbook.add_format({'indent': 2, 'border': 1})
+    fmt_check = workbook.add_format({'border': 1})
+    
+    # 1. Identificar o "Semi" de cada produto vendido
+    # Procura nos componentes do Kit se existe algum com nome "Semi" ou "Base"
+    mapa_produto_semi = {}
+    
+    for _, row in df_estoque.iterrows():
+        if str(row.get('eh_kit', '')).lower() == 'sim':
+            comps_nomes = [] # Precisaria dos nomes dos componentes, mas aqui só tenho códigos no CSV de estoque
+            # Como o CSV de estoque tem 'componentes' (códigos), vou tentar achar o nome do componente
+            # Isso exigiria um lookup reverso. Simplificação:
+            # Vou assumir que o "Semi" é o PRIMEIRO componente da lista do Kit
+            comps_cods = [normalize_key(c.strip()) for c in str(row.get('componentes', '')).split(',') if c.strip()]
+            if comps_cods:
+                semi_cod = comps_cods[0] # Assumindo que o Semi é o primeiro
+                # Busca o nome desse Semi
+                semi_row = df_estoque[df_estoque['codigo_key'] == semi_cod]
+                if not semi_row.empty:
+                    mapa_produto_semi[row['codigo_key']] = semi_row.iloc[0]['nome']
+                else:
+                    mapa_produto_semi[row['codigo_key']] = f"Base ({semi_cod})"
+    
+    # 2. Agrupar vendas por Canal
+    canais = df_vendas_fila['Canal'].unique()
+    
+    for canal in canais:
+        # Limpa nome da aba (max 31 chars)
+        nome_aba = str(canal).replace('📊 ', '').replace('🛒 ', '').replace('🛍️ ', '').replace('🏪 ', '').replace('👗 ', '')
+        # Remove caracteres inválidos para abas de Excel: : \ / ? * [ ]
+        for char in [':', '\\', '/', '?', '*', '[', ']']:
+            nome_aba = nome_aba.replace(char, '-')
+        nome_aba = nome_aba[:30]
+        worksheet = workbook.add_worksheet(nome_aba)
+        
+        # Cabeçalhos
+        worksheet.write(0, 0, "Item / Produto", fmt_header)
+        worksheet.write(0, 1, "Quantidade", fmt_header)
+        worksheet.write(0, 2, "Check", fmt_header)
+        worksheet.set_column(0, 0, 60)
+        worksheet.set_column(1, 1, 15)
+        worksheet.set_column(2, 2, 10)
+        
+        # Filtra vendas do canal
+        vendas_canal = df_vendas_fila[df_vendas_fila['Canal'] == canal]
+        
+        # Agrupa por Semi
+        arvore = {} # { 'Nome do Semi': [ {'produto': 'Body X', 'qtd': 10}, ... ] }
+        
+        for _, row in vendas_canal.iterrows():
+            prod_cod = str(row['Produto'])
+            prod_key = normalize_key(prod_cod)
+            qtd = row['Quantidade']
+            
+            # Tenta achar o nome do produto no estoque
+            prod_nome = prod_cod
+            prod_row = df_estoque[df_estoque['codigo_key'] == prod_key]
+            if not prod_row.empty: prod_nome = prod_row.iloc[0]['nome']
+            
+            semi_nome = mapa_produto_semi.get(prod_key, "Outros / Sem Base Definida")
+            
+            if semi_nome not in arvore: arvore[semi_nome] = []
+            arvore[semi_nome].append({'produto': prod_nome, 'qtd': qtd})
+            
+        # Escreve na aba
+        row_idx = 1
+        for semi, itens in arvore.items():
+            total_semi = sum(item['qtd'] for item in itens)
+            
+            # Linha do Pai (Semi)
+            worksheet.write(row_idx, 0, f"{semi}", fmt_pai)
+            worksheet.write(row_idx, 1, total_semi, fmt_pai)
+            worksheet.write(row_idx, 2, "", fmt_pai)
+            row_idx += 1
+            
+            # Linhas dos Filhos (Produtos Finais)
+            for item in itens:
+                worksheet.write(row_idx, 0, f"  {item['produto']}", fmt_filho)
+                worksheet.write(row_idx, 1, item['qtd'], fmt_filho)
+                worksheet.write(row_idx, 2, "[   ]", fmt_check)
+                row_idx += 1
+            
+            row_idx += 1 # Espaço entre grupos
+            
+    workbook.close()
+    return output.getvalue()
+
+# ==============================================================================
+# CONEXÃO COM GOOGLE SHEETS
+# ==============================================================================
+@st.cache_resource
+def conectar_google_sheets():
+    scope = ['https://spreadsheets.google.com/feeds','https://www.googleapis.com/auth/drive']
+    if "GOOGLE_SHEETS_CREDENTIALS" in st.secrets:
+        creds_dict = json.loads(st.secrets["GOOGLE_SHEETS_CREDENTIALS"])
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    else:
+        st.error("❌ Credenciais não encontradas no st.secrets.")
+        st.stop()
+    gc = gspread.authorize(creds)
+    if "GOOGLE_SHEETS_URL" in st.secrets:
+        ss = gc.open_by_url(st.secrets["GOOGLE_SHEETS_URL"])
+        return ss, gc
+    else:
+        st.error("❌ URL da planilha não encontrada.")
+        st.stop()
+
+@st.cache_data(ttl=60)
+def carregar_dados_detalhes():
+    try:
+        ss, _ = conectar_google_sheets()
+        ws = ss.worksheet("6. Detalhes")
+        all_values = ws.get_all_values()
+        if not all_values: return pd.DataFrame(columns=COLUNAS_ESPERADAS)
+        
+        header_idx = -1
+        for i, row in enumerate(all_values[:5]):
+            if 'Total Venda' in row and 'Lucro Bruto' in row and 'Produto' in row:
+                header_idx = i
+                break
+        
+        if header_idx == -1: return pd.DataFrame(columns=COLUNAS_ESPERADAS)
+            
+        df = pd.DataFrame(all_values[header_idx+1:], columns=all_values[header_idx])
+        
+        cols_money = ['Total Venda', 'Custo Total', 'Lucro Bruto', 'Investimento Ads', 'Custo Produto', 'Impostos', 'Comissão', 'Taxas Fixas', 'Embalagem']
+        for col in cols_money:
+            if col in df.columns: df[col] = df[col].apply(clean_currency)
+            
+        if 'Margem (%)' in df.columns:
+            df['Margem (%)'] = df['Margem (%)'].apply(clean_percent_read)
+            
+        if 'Quantidade' in df.columns:
+            df['Quantidade'] = df['Quantidade'].apply(clean_float)
+            
+        return df
+    except: return pd.DataFrame(columns=COLUNAS_ESPERADAS)
+
+@st.cache_data(ttl=3600)
+def carregar_configuracoes():
+    try:
+        ss, gc = conectar_google_sheets()
+        configs_data = {}
+        estoque_produtos = set()
+        
+        if "TEMPLATE_ESTOQUE_URL" in st.secrets:
+            try:
+                ss_estoque = gc.open_by_url(st.secrets["TEMPLATE_ESTOQUE_URL"])
+                ws_estoque = ss_estoque.worksheet('template_estoque')
+                df_estoque = pd.DataFrame(ws_estoque.get_all_records())
+                if 'codigo' in df_estoque.columns:
+                    estoque_produtos = set(df_estoque['codigo'].tolist())
+            except: pass
+        
+        abas_config = [("Produtos", "produtos"), ("Kits", "kits"), ("Canais", "canais"), 
+                       ("Custos por Pedido", "custos_ped"), ("Impostos", "impostos"), 
+                       ("Frete", "frete"), ("Metas", "metas")]
+        
+        for nome_aba, chave in abas_config:
+            try:
+                sh = ss.worksheet(nome_aba)
+                data = sh.get_all_values()
+                if len(data) > 1:
+                    cols = data[0]
+                    counts = {}
+                    new_cols = []
+                    for col in cols:
+                        if col in counts: counts[col] += 1; new_cols.append(f"{col}_{counts[col]}")
+                        else: counts[col] = 0; new_cols.append(col)
+                    
+                    df = pd.DataFrame(data[1:], columns=new_cols)
+                    for col in df.columns:
+                        if any(x in col for x in ['R$', '%', 'Peso', 'Custo', 'Preço', 'Taxa', 'Frete', 'Valor']):
+                            df[col] = df[col].apply(clean_currency)
+                    configs_data[chave] = df
+            except: pass
+        return configs_data, estoque_produtos
+    except: return None, None
+
+# ==============================================================================
+# LÓGICA DE NEGÓCIO (BI FINANCEIRO)
+# ==============================================================================
+def classificar_bcg(row, median_vendas, median_margem):
+    vendas = row['Total Venda']
+    margem = row['Margem (%)']
+    if vendas >= median_vendas and margem >= median_margem: return 'Estrela ⭐'
+    elif vendas >= median_vendas and margem < median_margem: return 'Vaca Leiteira 🐄'
+    elif vendas < median_vendas and margem >= median_margem: return 'Interrogação ❓'
+    else: return 'Abacaxi 🍍'
+
+def obter_status_meta(margem, metas):
+    try:
+        minima = float(metas.get('Margem Líquida Mínima (%)', 10)) / 100
+        ideal = float(metas.get('Margem Líquida Ideal (%)', 15)) / 100
+        
+        if margem >= ideal: return '🟢 Ideal'
+        elif margem >= minima: return '🟡 Atenção'
+        else: return '🔴 Crítico'
+    except: return '⚪ N/A'
+
+def processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads_total):
+    df_novo = pd.DataFrame()
+    if 'Código' in df_orig.columns and 'Quantidade' in df_orig.columns:
+        df_novo['Data'] = [data_venda] * len(df_orig)
+        df_novo['Produto'] = df_orig['Código']
+        df_novo['Quantidade'] = pd.to_numeric(df_orig['Quantidade'], errors='coerce').fillna(0)
+        
+        if 'Valor' in df_orig.columns: df_novo['Total'] = df_orig['Valor'].apply(clean_currency)
+        elif 'Preço' in df_orig.columns: df_novo['Total'] = df_orig['Preço'].apply(clean_currency) * df_novo['Quantidade']
+        else: df_novo['Total'] = 0.0
+        df_novo['Preço Unitário'] = df_novo['Total'] / df_novo['Quantidade']
+    else:
+        st.error("Colunas obrigatórias não encontradas: 'Código', 'Quantidade', 'Valor' (ou 'Preço').")
+        return None, None
+
+    df_novo['Canal'] = CHANNELS[canal]
+    df_novo['CNPJ'] = cnpj_regime
+
+    produtos_df = st.session_state.get('produtos', pd.DataFrame())
+    kits_df = st.session_state.get('kits', pd.DataFrame())
+    impostos_df = st.session_state.get('impostos', pd.DataFrame())
+    canais_df = st.session_state.get('canais', pd.DataFrame())
+    custos_ped_df = st.session_state.get('custos_ped', pd.DataFrame())
+
+    produtos_map = {}
+    if not produtos_df.empty and 'Código' in produtos_df.columns:
+        for _, row in produtos_df.iterrows():
+            produtos_map[normalizar(str(row['Código']))] = {'custo': float(row.get('Custo (R$)', 0))}
+
+    kits_map = {}
+    if not kits_df.empty and 'Código Kit' in kits_df.columns:
+        for _, row in kits_df.iterrows():
+            cod_kit = normalizar(str(row['Código Kit']))
+            comps = str(row.get('SKUs Componentes', '')).split(';') if ';' in str(row.get('SKUs Componentes', '')) else [str(row.get('SKUs Componentes', ''))]
+            qtds = str(row.get('Qtd Componentes', '')).split(';') if ';' in str(row.get('Qtd Componentes', '')) else [str(row.get('Qtd Componentes', ''))]
+            if len(qtds) < len(comps): qtds = [1]*len(comps)
+            kits_map[cod_kit] = [{'sku': c.strip(), 'qtd': clean_float(q)} for c, q in zip(comps, qtds)]
+
+    aliquota = 0.06
+    if not impostos_df.empty and 'Tipo' in impostos_df.columns:
+        m = impostos_df[impostos_df['Tipo'].str.contains(cnpj_regime.split()[0], case=False, na=False)]
+        if not m.empty: aliquota = float(m.iloc[0]['Alíquota (%)']) / 100
+
+    taxa_mp, taxa_fixa = 0.16, 5.0
+    if not canais_df.empty and 'Canal' in canais_df.columns:
+        m = canais_df[canais_df['Canal'].str.contains(canal.replace('_', ' '), case=False, na=False)]
+        if not m.empty:
+            taxa_mp = float(m.iloc[0].get('Taxa Marketplace (%)', 16)) / 100
+            taxa_fixa = float(m.iloc[0].get('Taxa Fixa Pedido (R$)', 5))
+
+    custo_emb = 0.0
+    if not custos_ped_df.empty and 'Custo Unitário (R$)' in custos_ped_df.columns:
+        custo_emb = custos_ped_df['Custo Unitário (R$)'].sum()
+
+    resultados = []
+    faltantes = []
+    total_vendas_dia = df_novo['Total'].sum()
+
+    for _, row in df_novo.iterrows():
+        prod_cod = str(row['Produto']).strip()
+        prod_norm = normalizar(prod_cod)
+        qtd = row['Quantidade']
+        total_venda = row['Total']
+        
+        custo_produto = 0.0
+        tipo = 'Produto'
+        encontrado = False
+        erro_motivo = ""
+        
+        if prod_norm in kits_map:
+            tipo = 'Kit'
+            encontrado = True
+            for comp in kits_map[prod_norm]:
+                c_norm = normalizar(comp['sku'])
+                if c_norm in produtos_map:
+                    c_custo = produtos_map[c_norm]['custo']
+                    if c_custo <= 0:
+                        encontrado = False
+                        erro_motivo = f"Componente {comp['sku']} com Custo Zero"
+                        break
+                    custo_produto += c_custo * comp['qtd']
+                else:
+                    encontrado = False
+                    erro_motivo = f"Componente {comp['sku']} não cadastrado"
+                    break
+        elif prod_norm in produtos_map:
+            custo_produto = produtos_map[prod_norm]['custo']
+            if custo_produto > 0:
+                encontrado = True
+            else:
+                erro_motivo = "Custo Zero no Cadastro"
         else:
-            st.info("Dados de preço indisponíveis.")
+            erro_motivo = "Produto não cadastrado"
+        
+        if not encontrado:
+            faltantes.append({'Código': prod_cod, 'Motivo': erro_motivo})
+            continue
 
-    with tabs[5]: # Detalhes
-        st.subheader("Base de Dados Completa")
-        st.dataframe(df_vendas, use_container_width=True)
+        custo_total_prod = custo_produto * qtd
+        imposto_val = total_venda * aliquota
+        comissao_val = total_venda * taxa_mp
+        taxa_fixa_val = taxa_fixa * qtd
+        ads_rateio = (total_venda / total_vendas_dia) * custo_ads_total if total_vendas_dia > 0 else 0.0
+        
+        custo_total_geral = custo_total_prod + imposto_val + comissao_val + taxa_fixa_val + (custo_emb * qtd) + ads_rateio
+        lucro = total_venda - custo_total_geral
+        margem = (lucro / total_venda) if total_venda > 0 else 0.0
+        
+        resultados.append({
+            'Data': row['Data'], 'Canal': row['Canal'], 'CNPJ': row['CNPJ'],
+            'Produto': prod_cod, 'Tipo': tipo, 'Quantidade': qtd, 'Total Venda': total_venda,
+            'Custo Produto': custo_total_prod, 'Impostos': imposto_val, 'Comissão': comissao_val,
+            'Taxas Fixas': taxa_fixa_val, 'Embalagem': custo_emb * qtd, 'Investimento Ads': ads_rateio,
+            'Custo Total': custo_total_geral, 'Lucro Bruto': lucro, 'Margem (%)': margem
+        })
+        
+    return pd.DataFrame(resultados), pd.DataFrame(faltantes)
 
-    with tabs[6]: # Giro
-        st.subheader("Giro de Produtos")
-        if 'Quantidade' in df_vendas.columns:
-            df_giro = df_vendas.groupby('Produto')['Quantidade'].sum().reset_index()
-            df_giro.columns = ['Produto', 'Total Vendido']
-            df_giro_sorted = df_giro.sort_values('Total Vendido', ascending=False).head(50)
-            st.dataframe(df_giro_sorted, use_container_width=True, height=500)
+def calcular_giro_produtos(df_detalhes):
+    kits_df = st.session_state.get('kits', pd.DataFrame())
+    kits_map = {}
+    if not kits_df.empty and 'Código Kit' in kits_df.columns:
+        for _, row in kits_df.iterrows():
+            cod_kit = normalizar(str(row['Código Kit']))
+            comps = str(row.get('SKUs Componentes', '')).split(';') if ';' in str(row.get('SKUs Componentes', '')) else [str(row.get('SKUs Componentes', ''))]
+            qtds = str(row.get('Qtd Componentes', '')).split(';') if ';' in str(row.get('Qtd Componentes', '')) else [str(row.get('Qtd Componentes', ''))]
+            if len(qtds) < len(comps): qtds = [1]*len(comps)
+            kits_map[cod_kit] = [{'sku': c.strip(), 'qtd': clean_float(q)} for c, q in zip(comps, qtds)]
+
+    giro_real = []
+    
+    for _, row in df_detalhes.iterrows():
+        prod_cod = str(row['Produto']).strip()
+        prod_norm = normalizar(prod_cod)
+        qtd_venda = row['Quantidade']
+        
+        if prod_norm in kits_map:
+            for comp in kits_map[prod_norm]:
+                giro_real.append({
+                    'SKU Real': comp['sku'],
+                    'Qtd Vendida': qtd_venda * comp['qtd'],
+                    'Origem': 'Kit'
+                })
         else:
-            st.info("Dados de quantidade indisponíveis.")
+            giro_real.append({
+                'SKU Real': prod_cod,
+                'Qtd Vendida': qtd_venda,
+                'Origem': 'Avulso'
+            })
+            
+    if not giro_real: return pd.DataFrame()
+    
+    df_giro = pd.DataFrame(giro_real)
+    df_agrupado = df_giro.groupby('SKU Real')['Qtd Vendida'].sum().reset_index()
+    df_agrupado = df_agrupado.sort_values('Qtd Vendida', ascending=False)
+    
+    return df_agrupado
 
-    with tabs[7]: # Oportunidades
-        st.subheader("🚀 Oportunidades de Melhoria")
-        st.write("Produtos com alta margem e baixo volume (Interrogação) que podem ser promovidos:")
-        # Lógica de filtro para Interrogação
-        if 'Classificação' in df_bcg.columns:
-            oportunidades = df_bcg[df_bcg['Classificação'] == 'Interrogação ❓'].sort_values('Margem (%)', ascending=False)
-            st.dataframe(oportunidades, use_container_width=True)
+def calcular_oportunidades(df_detalhes):
+    kits_df = st.session_state.get('kits', pd.DataFrame())
+    kits_map = {}
+    if not kits_df.empty and 'Código Kit' in kits_df.columns:
+        for _, row in kits_df.iterrows():
+            cod_kit = normalizar(str(row['Código Kit']))
+            comps = str(row.get('SKUs Componentes', '')).split(';') if ';' in str(row.get('SKUs Componentes', '')) else [str(row.get('SKUs Componentes', ''))]
+            qtds = str(row.get('Qtd Componentes', '')).split(';') if ';' in str(row.get('Qtd Componentes', '')) else [str(row.get('Qtd Componentes', ''))]
+            if len(qtds) < len(comps): qtds = [1]*len(comps)
+            kits_map[cod_kit] = [{'sku': c.strip(), 'qtd': clean_float(q)} for c, q in zip(comps, qtds)]
+
+    giro_canal = []
+    
+    for _, row in df_detalhes.iterrows():
+        prod_cod = str(row['Produto']).strip()
+        prod_norm = normalizar(prod_cod)
+        qtd_venda = row['Quantidade']
+        canal = row['Canal']
+        
+        if prod_norm in kits_map:
+            for comp in kits_map[prod_norm]:
+                giro_canal.append({
+                    'SKU Real': comp['sku'],
+                    'Canal': canal,
+                    'Qtd Vendida': qtd_venda * comp['qtd']
+                })
         else:
-            st.info("Classificação BCG não disponível.")
+            giro_canal.append({
+                'SKU Real': prod_cod,
+                'Canal': canal,
+                'Qtd Vendida': qtd_venda
+            })
+            
+    if not giro_canal: return pd.DataFrame()
+    
+    df_giro_canal = pd.DataFrame(giro_canal)
+    df_pivot = df_giro_canal.pivot_table(index='SKU Real', columns='Canal', values='Qtd Vendida', aggfunc='sum', fill_value=0).reset_index()
+    
+    cols_canais = [c for c in df_pivot.columns if c != 'SKU Real']
+    df_pivot['Total Geral'] = df_pivot[cols_canais].sum(axis=1)
+    df_pivot = df_pivot.sort_values('Total Geral', ascending=False)
+    
+    return df_pivot
+
+def atualizar_dashboards_resumo(df_detalhes, metas_dict):
+    if df_detalhes.empty: return None, None, None, None, None, None, None
+    
+    cols_req = ['Canal', 'Total Venda', 'Lucro Bruto', 'Quantidade', 'Margem (%)', 'CNPJ', 'Produto']
+    if not all(c in df_detalhes.columns for c in cols_req): return None, None, None, None, None, None, None
+
+    dash_geral = df_detalhes.groupby('Canal').agg({
+        'Total Venda': 'sum', 'Lucro Bruto': 'sum', 'Quantidade': 'sum', 'Margem (%)': 'mean'
+    }).reset_index()
+    dash_geral['Status Meta'] = dash_geral['Margem (%)'].apply(lambda x: obter_status_meta(x, metas_dict))
+    
+    dash_cnpj = df_detalhes.groupby(['CNPJ', 'Canal']).agg({
+        'Total Venda': 'sum', 'Lucro Bruto': 'sum', 'Margem (%)': 'mean'
+    }).reset_index()
+    
+    dash_exec = df_detalhes.groupby('Produto').agg({
+        'Quantidade': 'sum', 'Total Venda': 'sum', 'Lucro Bruto': 'sum', 'Margem (%)': 'mean'
+    }).reset_index()
+    med_v = dash_exec['Total Venda'].median()
+    med_m = dash_exec['Margem (%)'].median()
+    dash_exec['Classificação BCG'] = dash_exec.apply(lambda x: classificar_bcg(x, med_v, med_m), axis=1)
+    dash_exec['Status Meta'] = dash_exec['Margem (%)'].apply(lambda x: obter_status_meta(x, metas_dict))
+    
+    dash_exec['Classificação BCG'] = pd.Categorical(dash_exec['Classificação BCG'], categories=ORDEM_BCG, ordered=True)
+    dash_exec = dash_exec.sort_values(['Classificação BCG', 'Total Venda'], ascending=[True, False])
+    dash_exec.insert(0, 'Ranking', range(1, len(dash_exec) + 1))
+    
+    dash_bcg_canal = df_detalhes.groupby(['Canal', 'Produto']).agg({
+        'Total Venda': 'sum', 'Margem (%)': 'mean', 'Quantidade': 'sum'
+    }).reset_index()
+    bcg_final = []
+    for canal in dash_bcg_canal['Canal'].unique():
+        subset = dash_bcg_canal[dash_bcg_canal['Canal'] == canal].copy()
+        med_v_c = subset['Total Venda'].median()
+        med_m_c = subset['Margem (%)'].median()
+        subset['Classificação'] = subset.apply(lambda x: classificar_bcg(x, med_v_c, med_m_c), axis=1)
+        subset['Status Meta'] = subset['Margem (%)'].apply(lambda x: obter_status_meta(x, metas_dict))
+        
+        subset['Classificação'] = pd.Categorical(subset['Classificação'], categories=ORDEM_BCG, ordered=True)
+        subset = subset.sort_values(['Classificação', 'Total Venda'], ascending=[True, False])
+        subset.insert(0, 'Ranking', range(1, len(subset) + 1))
+        
+        bcg_final.append(subset)
+    
+    df_bcg_final = pd.concat(bcg_final) if bcg_final else pd.DataFrame()
+    if not df_bcg_final.empty:
+        df_bcg_final = df_bcg_final.sort_values(['Canal', 'Ranking'])
+
+    df_precos = df_detalhes.groupby(['Produto', 'Canal']).agg({
+        'Total Venda': 'sum', 'Quantidade': 'sum'
+    }).reset_index()
+    df_precos['Preço Médio'] = df_precos['Total Venda'] / df_precos['Quantidade']
+    df_precos_pivot = df_precos.pivot(index='Produto', columns='Canal', values='Preço Médio').reset_index()
+
+    df_giro = calcular_giro_produtos(df_detalhes)
+    df_oportunidades = calcular_oportunidades(df_detalhes)
+
+    return dash_geral, dash_cnpj, dash_exec, df_bcg_final, df_precos_pivot, df_giro, df_oportunidades
+
+def salvar_todos_dashboards(ss, d_geral, d_cnpj, d_exec, d_precos, d_bcg, d_giro, d_oportunidades):
+    def salvar_aba(nome, df):
+        try:
+            try:
+                ws = ss.worksheet(nome)
+            except:
+                ws = ss.add_worksheet(title=nome, rows=1000, cols=20)
+            
+            ws.clear()
+            df_fmt = df.copy()
+            
+            if nome == "4. Preços Marketplaces":
+                for col in df_fmt.columns:
+                    if col != 'Produto':
+                        df_fmt[col] = df_fmt[col].apply(lambda x: format_currency_br(x) if pd.notna(x) and x != 0 else "-")
+            else:
+                for c in df_fmt.columns:
+                    if 'Margem' in c: df_fmt[c] = df_fmt[c].apply(format_percent_br)
+                    elif any(x in c for x in ['Venda', 'Lucro', 'Custo', 'Preço']): df_fmt[c] = df_fmt[c].apply(format_currency_br)
+            
+            ws.update([df_fmt.columns.values.tolist()] + df_fmt.astype(str).values.tolist())
+        except Exception as e: st.error(f"Erro ao salvar aba {nome}: {e}")
+
+    if d_geral is not None: salvar_aba("1. Dashboard Geral", d_geral)
+    if d_cnpj is not None: salvar_aba("2. Análise por CNPJ", d_cnpj)
+    if d_exec is not None: salvar_aba("3. Análise Executiva", d_exec)
+    if d_precos is not None: salvar_aba("4. Preços Marketplaces", d_precos)
+    if d_bcg is not None: salvar_aba("5. Matriz BCG", d_bcg)
+    if d_giro is not None: salvar_aba("7. Giro de Produtos", d_giro)
+    if d_oportunidades is not None: salvar_aba("8. Oportunidades", d_oportunidades)
+
+# ==============================================================================
+# INTERFACE
+# ==============================================================================
+try:
+    ss, gc = conectar_google_sheets()
+    configs, estoque_produtos = carregar_configuracoes()
+    metas_dict = {}
+    if configs:
+        for key, df in configs.items(): st.session_state[key] = df
+        st.session_state['estoque_produtos'] = estoque_produtos
+        
+        if 'metas' in configs and not configs['metas'].empty:
+            for _, row in configs['metas'].iterrows():
+                try:
+                    metas_dict[row['Indicador']] = float(row['Valor'])
+                except: pass
+except Exception as e:
+    st.error(f"Erro conexão: {e}")
+    st.stop()
+
+st.title("📊 Sales BI Pro + 🏭 MRP Fábrica")
+
+with st.sidebar:
+    st.header("🔌 Status da Conexão")
+    
+    # MODO SIMULAÇÃO
+    modo_simulacao = st.checkbox("🧪 MODO SIMULAÇÃO (Sandbox)", value=False, help="Ative para testar uploads sem salvar nada na planilha.")
+    
+    if modo_simulacao:
+        st.warning("⚠️ MODO SIMULAÇÃO ATIVO: Nenhuma alteração será salva!")
+    
+    if ss:
+        st.success(f"Conectado a: **{ss.title}**")
+        
+        qtd_prod = len(st.session_state.get('produtos', []))
+        qtd_kits = len(st.session_state.get('kits', []))
+        
+        if qtd_prod > 0: st.info(f"📦 Produtos Carregados: {qtd_prod}")
+        else: st.error("❌ Nenhum Produto encontrado! Verifique a aba 'Produtos'.")
+        
+        if qtd_kits > 0: st.info(f"🧩 Kits Carregados: {qtd_kits}")
+        else: st.warning("⚠️ Nenhum Kit encontrado (ou aba 'Kits' vazia).")
+    else:
+        st.error("❌ Desconectado")
+
+    st.divider()
+    st.header("📥 Importar Vendas")
+    
+    if st.button("🔄 Atualizar Dados (Limpar Cache)"):
+        carregar_dados_detalhes.clear()
+        carregar_configuracoes.clear()
+        carregar_estoque_externo.clear()
+        st.success("Cache limpo! Recarregando...")
+        time.sleep(1)
+        st.rerun()
+        
+    formato = st.radio("Formato", ['Bling', 'Padrão'])
+    canal = st.selectbox("Canal", list(CHANNELS.keys()), format_func=lambda x: CHANNELS[x])
+    cnpj_regime = st.selectbox("CNPJ/Regime", ['Simples Nacional', 'Lucro Presumido', 'Lucro Real'])
+    data_venda = st.date_input("Data", datetime.now()) if formato == 'Bling' else datetime.now()
+    custo_ads = st.number_input("💰 Ads (R$)", min_value=0.0, step=10.0)
+    uploaded_file = st.file_uploader("Arquivo Excel", type=['xlsx'])
+    
+    # Variáveis de sessão para filas
+    if 'fila_baixa_estoque' not in st.session_state: st.session_state['fila_baixa_estoque'] = pd.DataFrame()
+    if 'fila_simulacao' not in st.session_state: st.session_state['fila_simulacao'] = pd.DataFrame()
+
+    btn_label = "🚀 Simular Processamento" if modo_simulacao else "🚀 Processar e Salvar"
+    
+    if uploaded_file and st.button(btn_label):
+        with st.spinner("Processando..."):
+            try:
+                df_orig = pd.read_excel(uploaded_file)
+                df_processado, df_faltantes = processar_arquivo(df_orig, data_venda, canal, cnpj_regime, custo_ads)
+                
+                if not df_faltantes.empty:
+                    st.error("⛔ OPERAÇÃO CANCELADA: Foram encontrados produtos com erros ou não cadastrados!")
+                    st.dataframe(df_faltantes)
+                    st.download_button("📥 Baixar Relatório de Erros", data=to_excel(df_faltantes), file_name="erros_impediram_salvamento.xlsx")
+                
+                elif df_processado is not None and not df_processado.empty:
+                    df_novo_lote = df_processado.copy()
+                    df_novo_lote['Canal'] = CHANNELS[canal]
+                    
+                    if modo_simulacao:
+                        # MODO SIMULAÇÃO: Salva apenas na fila temporária de simulação
+                        if st.session_state['fila_simulacao'].empty:
+                            st.session_state['fila_simulacao'] = df_novo_lote
+                        else:
+                            st.session_state['fila_simulacao'] = pd.concat([st.session_state['fila_simulacao'], df_novo_lote], ignore_index=True)
+                        st.success(f"🧪 SIMULAÇÃO: {len(df_processado)} vendas processadas na memória. Nada foi salvo.")
+                        
+                    else:
+                        # MODO REAL: Salva no Sheets e na fila real
+                        if st.session_state['fila_baixa_estoque'].empty:
+                            st.session_state['fila_baixa_estoque'] = df_novo_lote
+                        else:
+                            st.session_state['fila_baixa_estoque'] = pd.concat([st.session_state['fila_baixa_estoque'], df_novo_lote], ignore_index=True)
+                        
+                        ws_detalhes = ss.worksheet("6. Detalhes")
+                        first_row = ws_detalhes.row_values(1)
+                        if not first_row or 'Total Venda' not in first_row:
+                            ws_detalhes.clear()
+                            ws_detalhes.append_row(COLUNAS_ESPERADAS)
+                        
+                        df_salvar = df_processado.copy()
+                        for c in df_salvar.columns:
+                            if 'Margem' in c: df_salvar[c] = df_salvar[c].apply(format_percent_br)
+                            elif any(x in c for x in ['Venda', 'Lucro', 'Custo', 'Preço', 'Impostos', 'Comissão', 'Taxas', 'Embalagem', 'Ads']): 
+                                df_salvar[c] = df_salvar[c].apply(format_currency_br)
+                        
+                        df_salvar = df_salvar[COLUNAS_ESPERADAS]
+                        ws_detalhes.append_rows(df_salvar.astype(str).values.tolist())
+                        st.success(f"✅ {len(df_processado)} vendas salvas com sucesso!")
+                        
+                        carregar_dados_detalhes.clear()
+                        df_historico = carregar_dados_detalhes()
+                        if not df_historico.empty:
+                            d_geral, d_cnpj, d_exec, d_bcg, d_precos, d_giro, d_oportunidades = atualizar_dashboards_resumo(df_historico, metas_dict)
+                            salvar_todos_dashboards(ss, d_geral, d_cnpj, d_exec, d_precos, d_bcg, d_giro, d_oportunidades)
+                            st.success("Dashboards atualizados!")
+                            time.sleep(1)
+                            st.rerun()
+            except Exception as e: st.error(f"Erro: {e}")
+
+    st.divider()
+    st.header("💾 Manutenção")
+    if st.button("💾 Forçar Salvar Dashboards", disabled=modo_simulacao):
+        if modo_simulacao: st.error("Desative o Modo Simulação para salvar.")
+        else:
+            with st.spinner("Recalculando e salvando abas..."):
+                df_historico = carregar_dados_detalhes()
+                if not df_historico.empty:
+                    d_geral, d_cnpj, d_exec, d_bcg, d_precos, d_giro, d_oportunidades = atualizar_dashboards_resumo(df_historico, metas_dict)
+                    salvar_todos_dashboards(ss, d_geral, d_cnpj, d_exec, d_precos, d_bcg, d_giro, d_oportunidades)
+                    st.success("Todas as abas foram atualizadas na planilha!")
+
+st.divider()
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(["📈 Visão Geral", "🏢 Por CNPJ", "⭐ BCG Geral", "🎯 BCG por Canal", "💲 Preços", "📋 Detalhes", "📦 Giro de Produtos", "🚀 Oportunidades", "🏭 MRP Fábrica"])
+df_detalhes = carregar_dados_detalhes()
+
+if not df_detalhes.empty and 'Total Venda' in df_detalhes.columns:
+    d_geral, d_cnpj, d_exec, d_bcg, d_precos, d_giro, d_oportunidades = atualizar_dashboards_resumo(df_detalhes, metas_dict)
+
+    with tab1:
+        total_venda = df_detalhes['Total Venda'].sum()
+        margem_media = df_detalhes['Margem (%)'].mean()
+        ticket_medio = df_detalhes['Total Venda'].mean()
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Vendas Totais", format_currency_br(total_venda))
+        col2.metric("Margem Média", format_percent_br(margem_media))
+        col3.metric("Ticket Médio", format_currency_br(ticket_medio))
+        st.bar_chart(df_detalhes.groupby('Canal')['Total Venda'].sum())
+    with tab2: st.dataframe(d_cnpj)
+    with tab3: st.dataframe(d_exec)
+    with tab4: st.dataframe(d_bcg)
+    with tab5: st.dataframe(d_precos)
+    with tab6: st.dataframe(df_detalhes)
+    with tab7: st.dataframe(d_giro)
+    with tab8: st.dataframe(d_oportunidades)
+    
+    with tab9:
+        st.subheader("🏭 MRP - Planejamento de Produção em Cascata")
+        
+        if modo_simulacao:
+            st.warning("🧪 EXIBINDO DADOS DE SIMULAÇÃO (NADA SERÁ SALVO)")
+            df_vendas_fila = st.session_state.get('fila_simulacao', pd.DataFrame())
+        else:
+            df_vendas_fila = st.session_state.get('fila_baixa_estoque', pd.DataFrame())
+            
+        col_ctrl1, col_ctrl2 = st.columns(2)
+        with col_ctrl1:
+            if st.button("🔄 Carregar Estoque Externo"):
+                carregar_estoque_externo.clear()
+                st.success("Estoque recarregado!")
+        with col_ctrl2:
+            if st.button("🗑️ Limpar Fila"):
+                if modo_simulacao: st.session_state['fila_simulacao'] = pd.DataFrame()
+                else: st.session_state['fila_baixa_estoque'] = pd.DataFrame()
+                st.success("Fila limpa!")
+                time.sleep(1)
+                st.rerun()
+            
+        df_estoque_ext = carregar_estoque_externo()
+        
+        if df_estoque_ext.empty:
+            st.error("Não foi possível carregar o estoque externo.")
+        else:
+            if df_vendas_fila.empty:
+                st.info("ℹ️ A fila de vendas está vazia.")
+            else:
+                st.subheader(f"Plano de Produção ({len(df_vendas_fila)} vendas na fila)")
+                
+                # PROCESSAMENTO MRP
+                df_mrp = processar_mrp_fila(df_vendas_fila, df_estoque_ext)
+                
+                if df_mrp.empty:
+                    st.warning("Nenhuma ação necessária.")
+                else:
+                    st.write("### 📋 O que precisa ser feito?")
+                    acoes_order = ['SEPARAR_ESTOQUE', 'PRODUZIR_MONTAR', 'COMPRAR_PRODUZIR_EXTERNO', 'ERRO_CADASTRO', 'ERRO_RECEITA']
+                    for acao in acoes_order:
+                        itens = df_mrp[df_mrp['acao'] == acao]
+                        if not itens.empty:
+                            itens_agrupados = itens.groupby(['codigo', 'nome'])['qtd'].sum().reset_index()
+                            with st.expander(f"{acao.replace('_', ' ')} ({len(itens_agrupados)} itens)", expanded=True):
+                                st.dataframe(itens_agrupados)
+                    
+                    st.divider()
+                    
+                    # GERAÇÃO DE EXCEL HIERÁRQUICO
+                    try:
+                        excel_bytes = gerar_excel_hierarquico(df_vendas_fila, df_estoque_ext)
+                        st.download_button(
+                            label="📥 Baixar Ordem de Produção (Excel Hierárquico)",
+                            data=excel_bytes,
+                            file_name=f"ordem_producao_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            type="primary"
+                        )
+                    except Exception as e:
+                        st.error(f"Erro ao gerar Excel: {e}")
 
 else:
-    with tabs[0]:
-        st.info("Carregando dados da planilha mestre...")
+    st.info("Aguardando dados...")
